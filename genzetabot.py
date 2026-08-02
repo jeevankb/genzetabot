@@ -36,7 +36,9 @@ logging.basicConfig(
 accounts = {
     "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION")},
     "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION")},
-    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION")}
+    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION")},
+    "acc4": {"name": "Account 4", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC4_SESSION")},
+    "acc5": {"name": "Account 5", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC5_SESSION")}
 }
 
 CSV_FILE = "anime_group_chat_10000.csv"
@@ -193,16 +195,24 @@ async def main():
         logging.error(f"'{CSV_FILE}' not found!")
         return
 
-    # 3. Connect all 3 User Accounts via String Sessions (NO CODES NEEDED!)
+    # 3. Connect User Accounts via String Sessions (NO CODES NEEDED!)
     for acc_key, acc_data in accounts.items():
+        if not acc_data["session"]:
+            logging.warning(f"Skipping {acc_data['name']} because session string is missing.")
+            continue
+            
         client = TelegramClient(StringSession(acc_data["session"]), acc_data["api_id"], acc_data["api_hash"])
         await client.connect()
         if not await client.is_user_authorized():
             logging.error(f"{acc_data['name']} String Session is invalid! Cannot connect.")
-            return
+            continue
         clients[acc_key] = {"client": client, "name": acc_data["name"]}
         
-    logging.info("All 3 User Accounts Connected Safely!")
+    if not clients:
+        logging.error("No valid accounts connected! Exiting.")
+        return
+        
+    logging.info(f"{len(clients)} User Accounts Connected Safely!")
 
     # 4. Setup the Listener on Account 1 (It acts as the 'host' for commands)
     host_client = clients["acc1"]["client"]

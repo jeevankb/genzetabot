@@ -8,7 +8,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 accounts = {
     "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": "session_unique 6"},
     "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": "session_unique_4"},
-    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": "session_unique_5"}
+    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": "session_unique_5"},
+    "acc4": {"name": "Account 4", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": "acc4"},
+    "acc5": {"name": "Account 5", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": "acc5"}
 }
 
 async def main():
@@ -26,8 +28,11 @@ async def main():
         await client.connect()
         
         if await client.is_user_authorized():
-            # Save the session to a string format!
-            string_session = client.session.save()
+            # Convert SQLiteSession to StringSession
+            ss = StringSession()
+            ss.set_dc(client.session.dc_id, client.session.server_address, client.session.port)
+            ss.auth_key = client.session.auth_key
+            string_session = ss.save()
             print(f"✅ {data['name']} ({key.upper()}_SESSION):\n{string_session}\n")
         else:
             print(f"❌ {data['name']} is not authorized. Please run friends_chat.py locally first to login.\n")
