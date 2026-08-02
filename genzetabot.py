@@ -122,8 +122,21 @@ async def chat_loop():
                 line_index = 0 
                 message_tracker.clear() 
                 
-            delay = random.uniform(15.0, 18.0)
-            logging.info(f"Waiting {delay:.1f} seconds...")
+            # Dynamic Human-Like Delay
+            chance = random.random()
+            if chance < 0.2:
+                # 20% chance of a slow, thoughtful response
+                delay = random.uniform(30.0, 60.0)
+                logging.info(f"Taking a long break... Waiting {delay:.1f} seconds.")
+            elif chance < 0.4:
+                # 20% chance of rapid-fire response
+                delay = random.uniform(2.0, 5.0)
+                logging.info(f"Rapid response... Waiting {delay:.1f} seconds.")
+            else:
+                # 60% chance of normal conversation speed
+                delay = random.uniform(8.0, 15.0)
+                logging.info(f"Normal typing speed... Waiting {delay:.1f} seconds.")
+                
             await asyncio.sleep(delay)
             
     except asyncio.CancelledError:
@@ -195,7 +208,7 @@ async def main():
     host_client = clients["acc1"]["client"]
     entity = await host_client.get_entity(TARGET_CHAT)
 
-    @host_client.on(events.NewMessage(chats=entity, pattern=r'(?i)^/(start|stop)'))
+    @host_client.on(events.NewMessage(chats=entity, pattern=r'(?i)^/(lockon|lockoff)'))
     async def handler(event):
         global chat_task
         
@@ -217,24 +230,24 @@ async def main():
 
         command = event.pattern_match.group(1).lower()
         
-        if command == 'start':
+        if command == 'lockon':
             if chat_task and not chat_task.done():
                 return
             else:
                 chat_task = asyncio.create_task(chat_loop())
-                logging.info(f"Admin {sender.id} sent /start")
+                logging.info(f"Admin {sender.id} sent /lockon")
                 await asyncio.sleep(2)
                 await event.delete()
                 
-        elif command == 'stop':
+        elif command == 'lockoff':
             if chat_task and not chat_task.done():
                 chat_task.cancel()
                 chat_task = None
-                logging.info(f"Admin {sender.id} sent /stop")
+                logging.info(f"Admin {sender.id} sent /lockoff")
                 await asyncio.sleep(2)
                 await event.delete()
 
-    logging.info("Listening for /start and /stop commands in the group...")
+    logging.info("Listening for /lockon and /lockoff commands in the group...")
     
     try:
         await host_client.run_until_disconnected()
