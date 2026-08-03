@@ -111,6 +111,11 @@ async def chat_loop():
                     reply_msg_id = None
                     if reply_to_csv and reply_to_csv in message_tracker:
                         reply_msg_id = message_tracker[reply_to_csv]
+                        
+                    # 16-Second Safety Delay specifically for the Bot Account (Account 4)
+                    if speaker_key == "acc4":
+                        logging.info("Bot account (acc4) is up next. Waiting 16s for safety...")
+                        await asyncio.sleep(16.0)
                     
                     typing_time = min(max(len(msg) * 0.05, 2.0), 5.0)
                     async with active_account["client"].action(entity, 'typing'):
