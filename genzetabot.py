@@ -34,11 +34,10 @@ logging.basicConfig(
 )
 
 accounts = {
-    "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION")},
-    "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION")},
-    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION")},
-    "acc4": {"name": "Account 4", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC4_SESSION")},
-    "acc5": {"name": "Account 5", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC5_SESSION")}
+    "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION"), "bot_token": None},
+    "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION"), "bot_token": None},
+    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION"), "bot_token": None},
+    "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
 CSV_FILE = "anime_group_chat_10000.csv"
@@ -195,16 +194,23 @@ async def main():
         logging.error(f"'{CSV_FILE}' not found!")
         return
 
-    # 3. Connect User Accounts via String Sessions (NO CODES NEEDED!)
+    # 3. Connect User Accounts and Bot Accounts
     for acc_key, acc_data in accounts.items():
-        if not acc_data["session"]:
-            logging.warning(f"Skipping {acc_data['name']} because session string is missing.")
+        if not acc_data["session"] and not acc_data["bot_token"]:
+            logging.warning(f"Skipping {acc_data['name']} because session/token is missing.")
             continue
             
-        client = TelegramClient(StringSession(acc_data["session"]), acc_data["api_id"], acc_data["api_hash"])
-        await client.connect()
+        if acc_data["session"]:
+            # Normal User Account
+            client = TelegramClient(StringSession(acc_data["session"]), acc_data["api_id"], acc_data["api_hash"])
+            await client.connect()
+        else:
+            # Bot Token Account
+            client = TelegramClient(StringSession(), acc_data["api_id"], acc_data["api_hash"])
+            await client.start(bot_token=acc_data["bot_token"])
+
         if not await client.is_user_authorized():
-            logging.error(f"{acc_data['name']} String Session is invalid! Cannot connect.")
+            logging.error(f"{acc_data['name']} credentials invalid! Cannot connect.")
             continue
         clients[acc_key] = {"client": client, "name": acc_data["name"]}
         
