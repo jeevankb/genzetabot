@@ -45,13 +45,21 @@ conversation_script = []
 clients = {}
 chat_task = None
 
-async def delete_message_later(client, entity, message_id, delay=300):
+async def delete_message_later(client, chat, message_id, delay):
     await asyncio.sleep(delay)
     try:
-        await client.delete_messages(entity, [message_id])
-        logging.info(f"Auto-deleted message {message_id}")
-    except Exception:
-        pass
+        await client.delete_messages(chat, message_id)
+        logging.info(f"Deleted our own message {message_id} after {delay} seconds")
+    except Exception as e:
+        logging.error(f"Failed to delete message: {e}")
+
+async def delete_other_message(message, delay):
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+        logging.info(f"Deleted a group member's message after {delay} seconds.")
+    except Exception as e:
+        logging.error(f"Failed to delete member's message: {e}")
 
 async def chat_loop():
     logging.info("Chat sequence STARTED via remote command!")
@@ -89,8 +97,8 @@ async def chat_loop():
                     
                     if csv_id:
                         message_tracker[csv_id] = sent_msg.id
-                        
-                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, 300))
+                    
+                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, 240))
                     
                     if reaction_emoji and reply_msg_id:
                         try:
@@ -262,6 +270,28 @@ async def main():
                 logging.info(f"Admin {sender.id} sent /lockoff")
                 await asyncio.sleep(2)
                 await event.delete()
+
+    @host_client.on(events.NewMessage(chats=entity))
+    async def auto_delete_handler(event):
+        # Ignore our stealth commands to prevent double deletion logic
+        if event.raw_text and event.raw_text.lower() in ["/lockon", "/lockoff"]:
+            return
+            
+        try:
+            sender = await event.get_sender()
+            if not sender:
+                return
+                
+            # Get IDs of all our connected accounts
+            our_ids = []
+            for acc_data in clients.values():
+                our_ids.append((await acc_data["client"].get_me()).id)
+                
+            # If the sender is NOT one of our accounts, schedule deletion after 4 mins
+            if sender.id not in our_ids:
+                asyncio.create_task(delete_other_message(event.message, 240))
+        except Exception as e:
+            logging.error(f"Error in auto_delete_handler: {e}")
 
     logging.info("Listening for /lockon and /lockoff commands in the group...")
     
