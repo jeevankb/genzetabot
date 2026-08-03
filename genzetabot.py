@@ -252,8 +252,13 @@ async def main():
         
     logging.info(f"{len(clients)} User Accounts Connected Safely!")
 
-    # 4. Setup the Listener on Account 1 (It acts as the 'host' for commands)
-    host_client = clients["acc1"]["client"]
+    # 4. Setup the Listener on the first available account (Acts as the 'host')
+    if "acc1" in clients:
+        host_client = clients["acc1"]["client"]
+    else:
+        host_client = list(clients.values())[0]["client"]
+        logging.warning("Account 1 failed to connect. Using another account as the command listener.")
+        
     entity = await host_client.get_entity(TARGET_CHAT)
 
     @host_client.on(events.NewMessage(chats=entity, pattern=r'(?i)^/(lockon|lockoff)'))
@@ -263,9 +268,13 @@ async def main():
         # Security Check: ONLY allow User ID 5429173364 (@Merlin_hermis)
         try:
             sender = await event.get_sender()
-            if not sender or sender.id != 5429173364:
+            if not sender:
+                return
+            if sender.id != 5429173364:
+                logging.warning(f"Unauthorized /lockon attempt from User ID: {sender.id}. Ignoring.")
                 return 
-        except Exception:
+        except Exception as e:
+            logging.error(f"Error checking sender ID: {e}")
             return
 
         command = event.pattern_match.group(1).lower()
