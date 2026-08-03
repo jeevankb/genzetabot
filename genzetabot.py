@@ -3,6 +3,8 @@ import os
 import csv
 import random
 import logging
+import re
+from collections import defaultdict
 from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -11,6 +13,17 @@ from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 from telethon.tl.types import ChannelParticipantsAdmins
+
+# Try importing generative AI, but don't crash if missing locally
+try:
+    import google.generativeai as genai
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+
+if HAS_GENAI:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel('gemini-pro')
 
 # 1. Load Secrets
 load_dotenv()
@@ -60,6 +73,17 @@ async def delete_other_message(message, delay):
         logging.info(f"Deleted a group member's message after {delay} seconds.")
     except Exception as e:
         logging.error(f"Failed to delete member's message: {e}")
+
+async def send_dynamic_reply(client, entity, target_msg, text):
+    # Wait a few seconds to look like a human typing
+    await asyncio.sleep(random.uniform(3.0, 7.0))
+    try:
+        sent_msg = await client.send_message(entity, text, reply_to=target_msg)
+        # Auto delete the AI message after 4 minutes too
+        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, 240))
+        logging.info(f"Sent dynamic reply: {text}")
+    except Exception as e:
+        logging.error(f"Failed to send dynamic reply: {e}")
 
 async def chat_loop():
     logging.info("Chat sequence STARTED via remote command!")
@@ -287,9 +311,48 @@ async def main():
             for acc_data in clients.values():
                 our_ids.append((await acc_data["client"].get_me()).id)
                 
-            # If the sender is NOT one of our accounts, schedule deletion after 4 mins
+            # If the sender is NOT one of our accounts
             if sender.id not in our_ids:
+                # 1. Schedule deletion after 4 mins
                 asyncio.create_task(delete_other_message(event.message, 240))
+                
+                # 2. Keyword and AI Response System
+                msg_text = event.raw_text.lower() if event.raw_text else ""
+                if not msg_text:
+                    return
+
+                # Keyword Triggers
+                keyword_replies = {
+                    r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
+                    r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
+                    r'\b(anime|manga)\b': ["I love anime!", "What's your favorite anime?"]
+                }
+                
+                responded = False
+                for pattern, replies in keyword_replies.items():
+                    if re.search(pattern, msg_text):
+                        reply_acc = random.choice(list(clients.values()))
+                        reply_text = random.choice(replies)
+                        asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, reply_text))
+                        responded = True
+                        break
+                        
+                # 3. AI Response (if no keyword matched, and GEMINI API KEY is present)
+                if not responded and HAS_GENAI and os.getenv("GEMINI_API_KEY"):
+                    # 30% chance to reply, or 100% if it's a question
+                    if "?" in msg_text or random.random() < 0.3:
+                        try:
+                            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+                            model = genai.GenerativeModel("gemini-1.5-flash")
+                            prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
+                            
+                            response = await model.generate_content_async(prompt)
+                            if response and response.text:
+                                reply_acc = random.choice(list(clients.values()))
+                                asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, response.text.strip()))
+                        except Exception as e:
+                            logging.error(f"AI Generation failed: {e}")
+                            
         except Exception as e:
             logging.error(f"Error in auto_delete_handler: {e}")
 
