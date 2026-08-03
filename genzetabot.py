@@ -260,18 +260,10 @@ async def main():
     async def handler(event):
         global chat_task
         
-        # Security Check: Ensure the sender is an Admin of the group
+        # Security Check: ONLY allow User ID 5429173364 (@Merlin_hermis)
         try:
             sender = await event.get_sender()
-            is_me = sender.is_self
-            is_admin = False
-            
-            participants = await host_client.get_participants(entity, filter=ChannelParticipantsAdmins)
-            admin_ids = [p.id for p in participants]
-            if sender.id in admin_ids:
-                is_admin = True
-                
-            if not (is_me or is_admin):
+            if not sender or sender.id != 5429173364:
                 return 
         except Exception:
             return
