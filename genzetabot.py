@@ -174,8 +174,14 @@ async def chat_loop():
                 line_index = 0 
                 message_tracker.clear() 
                 
-            # Dynamic Human-Like Delay (4 to 10 seconds)
-            delay = random.uniform(4.0, 10.0)
+            # Simulate an active online group ("little spam")
+            if random.random() < 0.3:
+                # 30% chance they are typing very fast over each other
+                delay = random.uniform(1.0, 2.5)
+            else:
+                # 70% chance for a normal fast conversation
+                delay = random.uniform(3.0, 6.0)
+                
             logging.info(f"Waiting {delay:.1f}s before next message...")
             await asyncio.sleep(delay)
             
