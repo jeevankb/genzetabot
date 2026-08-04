@@ -30,7 +30,7 @@ load_dotenv()
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
 TARGET_CHAT_ID = None
 AUTO_DELETE_DELAY = 360
-MESSAGE_DELAY = None
+MESSAGE_DELAY = 900  # Default 15 minutes
 CHAT_PAUSED = False
 AI_TOPIC = None
 TOTAL_MESSAGES_SENT = 0
@@ -318,17 +318,26 @@ async def main():
         
         if cmd == "setspeed":
             if not args:
-                await event.reply("Usage: /setspeed <time> (e.g. 1s, 5s) or /setspeed auto")
+                await event.reply("Usage: /setspeed <time> (e.g. 15m, 1h) or /setspeed auto")
                 return
             args = args.lower().strip()
             if args == "auto":
                 MESSAGE_DELAY = None
-                await event.reply("Speed set to AUTO (Human-like random).")
-            elif args.endswith("s") and args[:-1].isdigit():
-                MESSAGE_DELAY = int(args[:-1])
-                await event.reply(f"Speed locked to {MESSAGE_DELAY} seconds per message.")
+                await event.reply("Speed set to AUTO (Fast Human-like random bursts).")
             else:
-                await event.reply("Invalid format. Use '1s', '5s', or 'auto'.")
+                try:
+                    if args.endswith('s'):
+                        MESSAGE_DELAY = int(args[:-1])
+                    elif args.endswith('m'):
+                        MESSAGE_DELAY = int(args[:-1]) * 60
+                    elif args.endswith('h'):
+                        MESSAGE_DELAY = int(args[:-1]) * 3600
+                    else:
+                        MESSAGE_DELAY = int(args) # Default to seconds if no suffix
+                        
+                    await event.reply(f"Speed locked to {MESSAGE_DELAY} seconds per message.")
+                except ValueError:
+                    await event.reply("Invalid format. Use '15m', '1h', or 'auto'.")
                 
         elif cmd == "topic":
             if not args:
