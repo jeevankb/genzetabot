@@ -79,8 +79,8 @@ async def send_dynamic_reply(client, entity, target_msg, text):
     await asyncio.sleep(random.uniform(3.0, 7.0))
     try:
         sent_msg = await client.send_message(entity, text, reply_to=target_msg)
-        # Auto delete the AI message after 4 minutes too
-        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, 240))
+        # Auto delete the AI message after 6 minutes (360s)
+        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, 360))
         logging.info(f"Sent dynamic reply: {text}")
     except Exception as e:
         logging.error(f"Failed to send dynamic reply: {e}")
@@ -116,6 +116,19 @@ async def chat_loop():
                     if speaker_key == "acc4":
                         logging.info("Bot account (acc4) is up next. Waiting 16s for safety...")
                         await asyncio.sleep(16.0)
+                        
+                        # Generate Anime News dynamically using Gemini
+                        if HAS_GENAI and os.getenv("GEMINI_API_KEY"):
+                            try:
+                                ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                                response = await ai_model.generate_content_async("Share a very short, interesting fact or latest news snippet about anime or manga.")
+                                if response and response.text:
+                                    msg = "📰 **Anime Fact:**\n" + response.text.strip()
+                            except Exception as e:
+                                logging.error(f"Failed to generate anime news: {e}")
+                                msg = "📰 Did you know? Spirited Away is the highest-grossing anime film in Japan!"
+                        else:
+                            msg = "📰 Did you know? The longest-running anime has over 7500 episodes!"
                     
                     typing_time = min(max(len(msg) * 0.05, 2.0), 5.0)
                     async with active_account["client"].action(entity, 'typing'):
@@ -127,7 +140,8 @@ async def chat_loop():
                     if csv_id:
                         message_tracker[csv_id] = sent_msg.id
                     
-                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, 240))
+                    # Delete message after 6 minutes (360 seconds)
+                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, 360))
                     
                     if reaction_emoji and reply_msg_id:
                         try:
@@ -160,21 +174,9 @@ async def chat_loop():
                 line_index = 0 
                 message_tracker.clear() 
                 
-            # Dynamic Human-Like Delay
-            chance = random.random()
-            if chance < 0.2:
-                # 20% chance of a slow, thoughtful response
-                delay = random.uniform(30.0, 60.0)
-                logging.info(f"Taking a long break... Waiting {delay:.1f} seconds.")
-            elif chance < 0.4:
-                # 20% chance of rapid-fire response
-                delay = random.uniform(2.0, 5.0)
-                logging.info(f"Rapid response... Waiting {delay:.1f} seconds.")
-            else:
-                # 60% chance of normal conversation speed
-                delay = random.uniform(8.0, 15.0)
-                logging.info(f"Normal typing speed... Waiting {delay:.1f} seconds.")
-                
+            # Dynamic Human-Like Delay (4 to 10 seconds)
+            delay = random.uniform(4.0, 10.0)
+            logging.info(f"Waiting {delay:.1f}s before next message...")
             await asyncio.sleep(delay)
             
     except asyncio.CancelledError:
@@ -319,8 +321,8 @@ async def main():
                 
             # If the sender is NOT one of our accounts
             if sender.id not in our_ids:
-                # 1. Schedule deletion after 4 mins
-                asyncio.create_task(delete_other_message(event.message, 240))
+                # 1. Schedule deletion after 6 mins (360s)
+                asyncio.create_task(delete_other_message(event.message, 360))
                 
                 # 2. Keyword and AI Response System
                 msg_text = event.raw_text.lower() if event.raw_text else ""
