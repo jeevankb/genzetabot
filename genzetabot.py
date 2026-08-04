@@ -28,6 +28,7 @@ if HAS_GENAI:
 # 1. Load Secrets
 load_dotenv()
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
+AUTO_DELETE_DELAY = 360
 
 # 2. Configure Logging & Directories
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,8 +80,8 @@ async def send_dynamic_reply(client, entity, target_msg, text):
     await asyncio.sleep(random.uniform(3.0, 7.0))
     try:
         sent_msg = await client.send_message(entity, text, reply_to=target_msg)
-        # Auto delete the AI message after 6 minutes (360s)
-        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, 360))
+        # Auto delete the AI message after global delay
+        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, AUTO_DELETE_DELAY))
         logging.info(f"Sent dynamic reply: {text}")
     except Exception as e:
         logging.error(f"Failed to send dynamic reply: {e}")
@@ -140,8 +141,8 @@ async def chat_loop():
                     if csv_id:
                         message_tracker[csv_id] = sent_msg.id
                     
-                    # Delete message after 6 minutes (360 seconds)
-                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, 360))
+                    # Delete message after global setting
+                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, AUTO_DELETE_DELAY))
                     
                     if reaction_emoji and reply_msg_id:
                         try:
@@ -274,7 +275,44 @@ async def main():
         
     entity = await host_client.get_entity(TARGET_CHAT)
 
-    @host_client.on(events.NewMessage(chats=entity, pattern=r'(?i)^/(lockon|lockoff)'))
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=entity))
+    async def set_delete_handler(event):
+        global AUTO_DELETE_DELAY
+        try:
+            sender = await event.get_sender()
+            if not sender or sender.id != 5429173364:
+                logging.warning(f"Unauthorized /setdelete attempt from User ID: {sender.id if sender else 'Unknown'}")
+                return 
+        except Exception as e:
+            return
+
+        time_str = event.pattern_match.group(1)
+        if not time_str:
+            await event.reply("Usage: /setdelete <time> (e.g. 1s, 45m, 24h)")
+            return
+            
+        time_str = time_str.lower().strip()
+        try:
+            if time_str.endswith('s'):
+                new_delay = int(time_str[:-1])
+            elif time_str.endswith('m'):
+                new_delay = int(time_str[:-1]) * 60
+            elif time_str.endswith('h'):
+                new_delay = int(time_str[:-1]) * 3600
+            else:
+                new_delay = int(time_str) # Default to seconds
+                
+            if new_delay < 1 or new_delay > 86400:
+                await event.reply("❌ Please set a time between 1 second and 24 hours (86400s).")
+                return
+                
+            AUTO_DELETE_DELAY = new_delay
+            await event.reply(f"✅ Auto-delete time successfully updated to {AUTO_DELETE_DELAY} seconds!")
+            logging.info(f"Auto-delete time changed to {AUTO_DELETE_DELAY}s by Admin.")
+        except ValueError:
+            await event.reply("❌ Invalid format. Please use a number followed by s, m, or h. (e.g. 10s, 5m, 2h)")
+
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)$', chats=entity))
     async def handler(event):
         global chat_task
         
@@ -312,7 +350,7 @@ async def main():
     @host_client.on(events.NewMessage(chats=entity))
     async def auto_delete_handler(event):
         # Ignore our stealth commands to prevent double deletion logic
-        if event.raw_text and event.raw_text.lower() in ["/lockon", "/lockoff"]:
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete")):
             return
             
         try:
@@ -327,8 +365,8 @@ async def main():
                 
             # If the sender is NOT one of our accounts
             if sender.id not in our_ids:
-                # 1. Schedule deletion after 6 mins (360s)
-                asyncio.create_task(delete_other_message(event.message, 360))
+                # 1. Schedule deletion after global setting
+                asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
                 
                 # 2. Keyword and AI Response System
                 msg_text = event.raw_text.lower() if event.raw_text else ""
