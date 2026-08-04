@@ -118,18 +118,21 @@ async def chat_loop():
                         logging.info("Bot account (acc4) is up next. Waiting 16s for safety...")
                         await asyncio.sleep(16.0)
                         
-                        # Generate Anime News dynamically using Gemini
-                        if HAS_GENAI and os.getenv("GEMINI_API_KEY"):
+                        # Generate Conversational AI response based on previous message
+                        if HAS_GENAI and os.getenv("GEMINI_API_KEY") and last_sent_text:
                             try:
                                 ai_model = genai.GenerativeModel("gemini-1.5-flash")
-                                response = await ai_model.generate_content_async("Share a very short, interesting fact or latest news snippet about anime or manga.")
+                                prompt = f"You are an anime fan in a group chat. Respond naturally, casually, and shortly (1 sentence max) to this group message: '{last_sent_text}'"
+                                response = await ai_model.generate_content_async(prompt)
                                 if response and response.text:
-                                    msg = "📰 **Anime Fact:**\n" + response.text.strip()
+                                    msg = response.text.strip()
                             except Exception as e:
-                                logging.error(f"Failed to generate anime news: {e}")
-                                msg = "📰 Did you know? Spirited Away is the highest-grossing anime film in Japan!"
+                                logging.error(f"Failed to generate conversational AI msg: {e}")
+                                msg = "Haha yeah exactly!"
                         else:
-                            msg = "📰 Did you know? The longest-running anime has over 7500 episodes!"
+                            msg = "I completely agree!"
+                    else:
+                        last_sent_text = msg
                     
                     typing_time = min(max(len(msg) * 0.05, 2.0), 5.0)
                     async with active_account["client"].action(entity, 'typing'):
@@ -368,12 +371,54 @@ async def main():
                 # 1. Schedule deletion after global setting
                 asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
                 
-                # 2. Keyword and AI Response System
                 msg_text = event.raw_text.lower() if event.raw_text else ""
                 if not msg_text:
                     return
 
-                # Keyword Triggers
+                # 2. Contextual Emoji Reaction (20% chance)
+                if random.random() < 0.2:
+                    emoji = "👍"
+                    if any(word in msg_text for word in ["lol", "lmao", "haha", "funny"]): emoji = "😂"
+                    elif any(word in msg_text for word in ["love", "amazing", "best", "great", "cute"]): emoji = "❤️"
+                    elif any(word in msg_text for word in ["fire", "insane", "crazy", "wow"]): emoji = "🔥"
+                    elif any(word in msg_text for word in ["sad", "cry", "rip", "bad"]): emoji = "😢"
+                    
+                    try:
+                        reactor_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
+                        await reactor_acc["client"](SendReactionRequest(
+                            peer=entity,
+                            msg_id=event.message.id,
+                            big=True,
+                            add_to_recent=True,
+                            reaction=[ReactionEmoji(emoticon=emoji)]
+                        ))
+                    except Exception as e:
+                        logging.error(f"Failed to send reaction: {e}")
+                        
+                # 3. Conversational AI Reply to Real Users
+                is_reply_to_bot = False
+                if event.message.is_reply:
+                    try:
+                        reply_msg = await event.message.get_reply_message()
+                        if "acc4" in clients:
+                            acc4_id = (await clients["acc4"]["client"].get_me()).id
+                            if reply_msg and reply_msg.sender_id == acc4_id:
+                                is_reply_to_bot = True
+                    except Exception:
+                        pass
+                        
+                if is_reply_to_bot and HAS_GENAI and os.getenv("GEMINI_API_KEY"):
+                    try:
+                        prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
+                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        response = await ai_model.generate_content_async(prompt)
+                        if response and response.text:
+                            asyncio.create_task(send_dynamic_reply(clients["acc4"]["client"], entity, event.message, response.text.strip()))
+                            return # Stop processing further keywords
+                    except Exception as e:
+                        logging.error(f"Failed to generate reply to real user: {e}")
+
+                # 4. Keyword Response System (if no direct reply)
                 keyword_replies = {
                     r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
                     r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
