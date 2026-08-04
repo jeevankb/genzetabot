@@ -177,8 +177,8 @@ async def chat_loop():
             line_index += 1
             if line_index >= len(conversation_script):
                 line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
-    logging.info(f"Randomly starting at line {line_index}") 
-                message_tracker.clear() 
+                logging.info(f"Randomly starting at line {line_index}") 
+                message_tracker.clear()
                 
             # Simulate an active online group ("little spam")
             if random.random() < 0.3:
