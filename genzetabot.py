@@ -315,7 +315,7 @@ async def main():
         except ValueError:
             await event.reply("❌ Invalid format. Please use a number followed by s, m, or h. (e.g. 10s, 5m, 2h)")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)$', chats=entity))
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)', chats=entity))
     async def handler(event):
         global chat_task
         
