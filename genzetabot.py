@@ -28,6 +28,7 @@ if HAS_GENAI:
 # 1. Load Secrets
 load_dotenv()
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
+TARGET_CHAT_ID = None
 AUTO_DELETE_DELAY = 360
 
 # 2. Configure Logging & Directories
@@ -51,7 +52,7 @@ accounts = {
     "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION"), "bot_token": None},
     "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION"), "bot_token": None},
     "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION"), "bot_token": None},
-    "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
+    "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC4_SESSION"), "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
 CSV_FILE = "anime_group_chat_10000.csv"
@@ -107,7 +108,7 @@ async def chat_loop():
             if speaker_key in clients:
                 active_account = clients[speaker_key]
                 try:
-                    entity = await active_account["client"].get_entity(TARGET_CHAT)
+                    entity = await active_account["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                     
                     reply_msg_id = None
                     if reply_to_csv and reply_to_csv in message_tracker:
@@ -169,7 +170,6 @@ async def chat_loop():
                 except FloodWaitError as e:
                     logging.warning(f"RATE LIMITED! Pausing chat for {e.seconds} seconds.")
                     await asyncio.sleep(e.seconds + 2)
-                    continue
                 except Exception as e:
                     logging.error(f"[{active_account['name']}] Error: {e}")
 
@@ -269,16 +269,26 @@ async def main():
         
     logging.info(f"{len(clients)} User Accounts Connected Safely!")
 
-    # 4. Setup the Listener on the first available account (Acts as the 'host')
+    # 4. Extract Chat ID using Account 1
     if "acc1" in clients:
-        host_client = clients["acc1"]["client"]
-    else:
-        host_client = list(clients.values())[0]["client"]
-        logging.warning("Account 1 failed to connect. Using another account as the command listener.")
+        try:
+            entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
+            global TARGET_CHAT_ID
+            TARGET_CHAT_ID = entity.id
+            logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
+        except Exception as e:
+            logging.error(f"Failed to resolve TARGET_CHAT: {e}")
+    
+    # 5. Setup the Listener strictly on Account 4 (The Bot)
+    if "acc4" not in clients:
+        logging.error("Account 4 (Bot) is NOT connected! The bot cannot listen for commands. Exiting.")
+        return
         
-    entity = await host_client.get_entity(TARGET_CHAT)
+    host_client = clients["acc4"]["client"]
+    listen_target = TARGET_CHAT_ID or TARGET_CHAT
+    logging.info("Account 4 (Bot) is now the active Command Controller.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=entity))
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=listen_target))
     async def set_delete_handler(event):
         global AUTO_DELETE_DELAY
         try:
@@ -315,7 +325,7 @@ async def main():
         except ValueError:
             await event.reply("❌ Invalid format. Please use a number followed by s, m, or h. (e.g. 10s, 5m, 2h)")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)', chats=entity))
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)', chats=listen_target))
     async def handler(event):
         global chat_task
         
