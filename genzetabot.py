@@ -55,7 +55,7 @@ accounts = {
     "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC4_SESSION"), "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
-CSV_FILE = "anime_group_chat_10000.csv"
+CSV_FILE = "multilingual_chat_200.csv"
 conversation_script = []
 clients = {}
 chat_task = None
@@ -89,7 +89,8 @@ async def send_dynamic_reply(client, entity, target_msg, text):
 
 async def chat_loop():
     logging.info("Chat sequence STARTED via remote command!")
-    line_index = 0
+    line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
+    logging.info(f"Randomly starting at line {line_index}")
     message_tracker = {}
     
     try:
@@ -175,7 +176,8 @@ async def chat_loop():
 
             line_index += 1
             if line_index >= len(conversation_script):
-                line_index = 0 
+                line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
+    logging.info(f"Randomly starting at line {line_index}") 
                 message_tracker.clear() 
                 
             # Simulate an active online group ("little spam")
