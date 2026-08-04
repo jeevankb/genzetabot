@@ -30,6 +30,10 @@ load_dotenv()
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
 TARGET_CHAT_ID = None
 AUTO_DELETE_DELAY = 360
+MESSAGE_DELAY = None
+CHAT_PAUSED = False
+AI_TOPIC = None
+TOTAL_MESSAGES_SENT = 0
 
 # 2. Configure Logging & Directories
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +99,9 @@ async def chat_loop():
     
     try:
         while True:
+            if CHAT_PAUSED:
+                await asyncio.sleep(2)
+                continue
             if not conversation_script:
                 logging.error("The conversation script is empty! Stopping.")
                 break
@@ -125,6 +132,8 @@ async def chat_loop():
                             try:
                                 ai_model = genai.GenerativeModel("gemini-1.5-flash")
                                 prompt = f"You are an anime fan in a group chat. Respond naturally, casually, and shortly (1 sentence max) to this group message: '{last_sent_text}'"
+                                if AI_TOPIC:
+                                    prompt += f" Critically, try to naturally steer the conversation towards this topic: {AI_TOPIC}"
                                 response = await ai_model.generate_content_async(prompt)
                                 if response and response.text:
                                     msg = response.text.strip()
@@ -141,6 +150,8 @@ async def chat_loop():
                         await asyncio.sleep(typing_time)
                         
                     sent_msg = await active_account["client"].send_message(entity, msg, reply_to=reply_msg_id)
+                    global TOTAL_MESSAGES_SENT
+                    TOTAL_MESSAGES_SENT += 1
                     logging.info(f"[{active_account['name']}] Sent: {msg}")
                     
                     if csv_id:
@@ -181,7 +192,9 @@ async def chat_loop():
                 message_tracker.clear()
                 
             # Simulate an active online group ("little spam")
-            if random.random() < 0.3:
+            if MESSAGE_DELAY is not None:
+                delay = MESSAGE_DELAY
+            elif random.random() < 0.3:
                 # 30% chance they are typing very fast over each other
                 delay = random.uniform(1.0, 2.5)
             else:
@@ -289,6 +302,56 @@ async def main():
     host_client = clients["acc4"]["client"]
     listen_target = TARGET_CHAT_ID or TARGET_CHAT
     logging.info("Account 4 (Bot) is now the active Command Controller.")
+
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/(setspeed|topic|stats|pause|resume)(?:\s+(.+))?', chats=listen_target))
+    async def admin_command_handler(event):
+        global MESSAGE_DELAY, CHAT_PAUSED, AI_TOPIC, AUTO_DELETE_DELAY, TOTAL_MESSAGES_SENT
+        try:
+            sender = await event.get_sender()
+            if not sender or sender.id != 5429173364:
+                return 
+        except Exception:
+            return
+
+        cmd = event.pattern_match.group(1).lower()
+        args = event.pattern_match.group(2)
+        
+        if cmd == "setspeed":
+            if not args:
+                await event.reply("Usage: /setspeed <time> (e.g. 1s, 5s) or /setspeed auto")
+                return
+            args = args.lower().strip()
+            if args == "auto":
+                MESSAGE_DELAY = None
+                await event.reply("Speed set to AUTO (Human-like random).")
+            elif args.endswith("s") and args[:-1].isdigit():
+                MESSAGE_DELAY = int(args[:-1])
+                await event.reply(f"Speed locked to {MESSAGE_DELAY} seconds per message.")
+            else:
+                await event.reply("Invalid format. Use '1s', '5s', or 'auto'.")
+                
+        elif cmd == "topic":
+            if not args:
+                AI_TOPIC = None
+                await event.reply("AI Topic cleared. AI will now converse naturally.")
+            else:
+                AI_TOPIC = args.strip()
+                await event.reply(f"AI Topic set to: {AI_TOPIC}. The bot will steer the conversation towards this on its next turn.")
+                
+        elif cmd == "pause":
+            CHAT_PAUSED = True
+            await event.reply("Chat automation PAUSED.")
+            
+        elif cmd == "resume":
+            CHAT_PAUSED = False
+            await event.reply("Chat automation RESUMED.")
+            
+        elif cmd == "stats":
+            speed_text = "AUTO" if MESSAGE_DELAY is None else f"{MESSAGE_DELAY}s"
+            status = "PAUSED ⏸️" if CHAT_PAUSED else "RUNNING ▶️"
+            topic = AI_TOPIC if AI_TOPIC else "None"
+            stats_msg = f"📊 **Bot Stats**\n\nStatus: {status}\nSpeed: {speed_text}\nAuto-Delete: {AUTO_DELETE_DELAY}s\nCurrent AI Topic: {topic}\nMessages Sent: {TOTAL_MESSAGES_SENT}"
+            await event.reply(stats_msg)
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=listen_target))
     async def set_delete_handler(event):
