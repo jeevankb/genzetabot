@@ -119,7 +119,7 @@ async def send_dynamic_reply(client, entity, target_msg, text):
         logging.error(f"Failed to send dynamic reply: {e}")
 
 def setup_commands(bot_client):
-    @bot_client.on(events.NewMessage(pattern='(?i)^/lockon$'))
+    @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         global bot_active
         # Only allow Account 1 to use this command
@@ -131,7 +131,7 @@ def setup_commands(bot_client):
                 logging.info("System LOCKED ON by admin.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff$'))
+    @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff(?:@genzetabot)?$'))
     async def lockoff_handler(event):
         global bot_active
         try:
@@ -142,7 +142,7 @@ def setup_commands(bot_client):
                 logging.info("System LOCKED OFF by admin.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/setspeed\\s+(.+)'))
+    @bot_client.on(events.NewMessage(pattern='(?i)^/setspeed(?:@genzetabot)?\\s+(.+)'))
     async def setspeed_handler(event):
         global message_speed
         try:
@@ -154,7 +154,7 @@ def setup_commands(bot_client):
                     await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/setdelete\\s+(.+)'))
+    @bot_client.on(events.NewMessage(pattern='(?i)^/setdelete(?:@genzetabot)?\\s+(.+)'))
     async def setdelete_handler(event):
         global delete_delay
         try:
