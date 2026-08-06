@@ -97,15 +97,14 @@ async def learning_chat_loop():
         logging.error("google.generativeai is not installed or API key missing. Cannot run Pegasis.")
         return
         
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-1.5-flash")
     active_keys = list(clients.keys())
     
     if not active_keys:
         logging.error("No accounts connected. Exiting loop.")
         return
 
-    entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-    
+    chat_target = TARGET_CHAT_ID or TARGET_CHAT    
     try:
         while True:
             if CHAT_PAUSED:
@@ -127,12 +126,11 @@ async def learning_chat_loop():
                 logging.error(f"AI Generation failed: {e}")
                 msg_text = "I don't know what to say right now."
                 
-            # Send the message
             try:
-                async with client.action(entity, 'typing'):
+                async with client.action(chat_target, 'typing'):
                     await asyncio.sleep(random.uniform(2.0, 5.0))
                 
-                sent_msg = await client.send_message(entity, msg_text)
+                sent_msg = await client.send_message(chat_target, msg_text)
                 TOTAL_MESSAGES_SENT += 1
                 logging.info(f"[{name}] Generated and Sent: {msg_text}")
                 
