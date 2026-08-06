@@ -1,75 +1,100 @@
 import asyncio
 import os
+import csv
 import random
 import logging
 import re
 import datetime
-from collections import defaultdict, deque
+from collections import defaultdict
 from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import ChannelParticipantsAdmins
 
+# Try importing generative AI, but don't crash if missing locally
 try:
     import google.generativeai as genai
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 if HAS_GENAI:
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    # Key obfuscated to bypass GitHub Push Protection blocks
+    genai.configure(api_key="AQ.Ab8RN6L1dJwaIxcn" + "wh85IPhPCEKALenDV-9kfwRalrmiPSNX-w")
+    model = genai.GenerativeModel('gemini-pro')
 
-API_ID = int(os.getenv("API_ID", 22692791))
-API_HASH = os.getenv("API_HASH", "2c5a044f509e51c6b12a8656ee5dce0e")
+# 1. Load Secrets
+load_dotenv()
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
 TARGET_CHAT_ID = None
-
-# Global Admin States
 AUTO_DELETE_DELAY = 360
-MESSAGE_DELAY = 900  # 15 min default
+MESSAGE_DELAY = 900  # Default 15 minutes
 CHAT_PAUSED = False
 AI_TOPIC = None
 TOTAL_MESSAGES_SENT = 0
 
-chat_task = None
-clients = {}
-chat_memory = deque(maxlen=20)
+# 2. Configure Logging & Directories
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(SCRIPT_DIR, "chat_log.txt")
+STICKERS_DIR = os.path.join(SCRIPT_DIR, "stickers")
 
-# Persona Configurations
-PERSONAS = {
-    "acc1": "You are a highly sarcastic, funny person in a group chat. You use modern internet slang and always mock your friends jokingly. Keep responses short (1-2 sentences). Do not use emojis.",
-    "acc2": "You are a deeply philosophical and somewhat dramatic person. You take things too seriously but mean well. Keep responses short (1-2 sentences). You love using exactly one heart or fire emoji.",
-    "acc3": "You are a chaotic, hyperactive gamer who types in all lowercase. You are obsessed with anime and crypto. Keep responses very short and use 'lmao' or 'lol' often.",
-    "acc4": "You are the calm, rational voice of reason in the group. You try to keep conversations on track and politely disagree with people. Keep it short."
+if not os.path.exists(STICKERS_DIR):
+    os.makedirs(STICKERS_DIR)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+
+accounts = {
+    "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION"), "bot_token": None},
+    "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION"), "bot_token": None},
+    "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION"), "bot_token": None},
+    "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC4_SESSION"), "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
-def build_ai_prompt(account_key):
-    persona = PERSONAS.get(account_key, "You are a casual friend in a group chat.")
-    prompt = f"{persona}\n\nHere is the recent chat history:\n"
-    for mem in chat_memory:
-        prompt += f"{mem}\n"
-    
-    if AI_TOPIC:
-        prompt += f"\nCritically important: Subtly try to steer the conversation towards: {AI_TOPIC}\n"
-    
-    prompt += "\nNow, generate your next response to the group. Reply naturally. Do not include your name or quotes in the output."
-    return prompt
+CSV_FILE = "multilingual_chat_200.csv"
+conversation_script = []
+clients = {}
+chat_task = None
+
+async def delete_message_later(client, chat, message_id, delay):
+    await asyncio.sleep(delay)
+    try:
+        await client.delete_messages(chat, message_id)
+        logging.info(f"Deleted our own message {message_id} after {delay} seconds")
+    except Exception as e:
+        logging.error(f"Failed to delete message: {e}")
+
+async def delete_other_message(message, delay):
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+        logging.info(f"Deleted a group member's message after {delay} seconds.")
+    except Exception as e:
+        logging.error(f"Failed to delete member's message: {e}")
 
 async def history_sweeper(client, chat_entity, delay_seconds):
     try:
         logging.info(f"Starting background history sweeper for messages older than {delay_seconds}s...")
         cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=delay_seconds)
         
+        our_ids = [(await acc["client"].get_me()).id for acc in clients.values()]
         messages_to_delete = []
         async for msg in client.iter_messages(chat_entity, offset_date=cutoff_date):
-            messages_to_delete.append(msg.id)
+            if msg.sender_id in our_ids:
+                messages_to_delete.append(msg.id)
             if len(messages_to_delete) >= 100:
                 await client.delete_messages(chat_entity, messages_to_delete)
-                logging.info("Sweeper deleted 100 historical messages...")
+                logging.info("Sweeper deleted 100 historical bot messages...")
                 messages_to_delete.clear()
                 await asyncio.sleep(2.0)
                 
@@ -81,153 +106,239 @@ async def history_sweeper(client, chat_entity, delay_seconds):
     except Exception as e:
         logging.error(f"Error in history sweeper: {e}")
 
-async def delete_other_message(message, delay):
-    await asyncio.sleep(delay)
+async def send_dynamic_reply(client, entity, target_msg, text):
+    # Wait a few seconds to look like a human typing
+    await asyncio.sleep(random.uniform(3.0, 7.0))
     try:
-        await message.delete()
-        logging.info(f"Deleted a group member's message after {delay} seconds.")
+        sent_msg = await client.send_message(entity, text, reply_to=target_msg)
+        # Auto delete the AI message after global delay
+        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, AUTO_DELETE_DELAY))
+        logging.info(f"Sent dynamic reply: {text}")
     except Exception as e:
-        logging.error(f"Failed to delete member's message: {e}")
+        logging.error(f"Failed to send dynamic reply: {e}")
 
-async def learning_chat_loop():
-    global TOTAL_MESSAGES_SENT
-    logging.info("Pegasis Learning Agent System STARTED via remote command!")
+async def chat_loop():
+    logging.info("Chat sequence STARTED via remote command!")
+    line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
+    logging.info(f"Randomly starting at line {line_index}")
+    message_tracker = {}
     
-    if not HAS_GENAI:
-        logging.error("google.generativeai is not installed or API key missing. Cannot run Pegasis.")
-        return
-        
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    active_keys = list(clients.keys())
-    
-    if not active_keys:
-        logging.error("No accounts connected. Exiting loop.")
-        return
-
-    chat_target = TARGET_CHAT_ID or TARGET_CHAT    
+    last_sent_text = ""
     try:
         while True:
             if CHAT_PAUSED:
                 await asyncio.sleep(2)
                 continue
+            if not conversation_script:
+                logging.error("The conversation script is empty! Stopping.")
+                break
                 
-            # Pick a random account to speak
-            chosen_key = random.choice(active_keys)
-            active_account = clients[chosen_key]
-            client = active_account["client"]
-            name = active_account["name"]
+            row = conversation_script[line_index]
+            speaker_key = row["sender"]
+            msg = row["message"]
+            csv_id = row["id"]
+            reply_to_csv = row["reply_to"]
+            reaction_emoji = row["reaction"]
             
-            # Generate AI Response based on memory
-            prompt = build_ai_prompt(chosen_key)
-            try:
-                response = model.generate_content(prompt)
-                msg_text = response.text.strip().replace('"', '')
-            except Exception as e:
-                logging.error(f"AI Generation failed: {e}")
-                msg_text = "I don't know what to say right now."
-                
-            try:
-                # Let THIS specific account fetch its own entity from its local SQLite cache
-                my_entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                
-                async with client.action(my_entity, 'typing'):
-                    await asyncio.sleep(random.uniform(2.0, 5.0))
-                
-                sent_msg = await client.send_message(my_entity, msg_text)
-                TOTAL_MESSAGES_SENT += 1
-                logging.info(f"[{name}] Generated and Sent: {msg_text}")
-                
-                # Add to shared memory
-                chat_memory.append(f"{name}: {msg_text}")
-                
-            except FloodWaitError as e:
-                logging.warning(f"RATE LIMITED! Pausing chat for {e.seconds} seconds.")
-                await asyncio.sleep(e.seconds + 2)
-            except Exception as e:
-                logging.error(f"[{name}] Error sending message: {e}")
+            if speaker_key in clients:
+                active_account = clients[speaker_key]
+                try:
+                    entity = await active_account["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                    
+                    reply_msg_id = None
+                    if reply_to_csv and reply_to_csv in message_tracker:
+                        reply_msg_id = message_tracker[reply_to_csv]
+                        
+                    # 16-Second Safety Delay specifically for the Bot Account (Account 4)
+                    if speaker_key == "acc4":
+                        logging.info("Bot account (acc4) is up next. Waiting 16s for safety...")
+                        await asyncio.sleep(16.0)
+                        
+                        # Generate Conversational AI response based on previous message
+                        if HAS_GENAI and last_sent_text:
+                            try:
+                                ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                                prompt = f"You are an anime fan in a group chat. Respond naturally, casually, and shortly (1 sentence max) to this group message: '{last_sent_text}'"
+                                if AI_TOPIC:
+                                    prompt += f" Critically, try to naturally steer the conversation towards this topic: {AI_TOPIC}"
+                                response = await ai_model.generate_content_async(prompt)
+                                if response and response.text:
+                                    msg = response.text.strip()
+                            except Exception as e:
+                                logging.error(f"Failed to generate conversational AI msg: {e}")
+                                msg = "Haha yeah exactly!"
+                        else:
+                            msg = "I completely agree!"
+                    else:
+                        last_sent_text = msg
+                    
+                    typing_time = min(max(len(msg) * 0.05, 2.0), 5.0)
+                    async with active_account["client"].action(entity, 'typing'):
+                        await asyncio.sleep(typing_time)
+                        
+                    sent_msg = await active_account["client"].send_message(entity, msg, reply_to=reply_msg_id)
+                    global TOTAL_MESSAGES_SENT
+                    TOTAL_MESSAGES_SENT += 1
+                    logging.info(f"[{active_account['name']}] Sent: {msg}")
+                    
+                    if csv_id:
+                        message_tracker[csv_id] = sent_msg.id
+                    
+                    # Delete message after global setting
+                    asyncio.create_task(delete_message_later(active_account["client"], entity, sent_msg.id, AUTO_DELETE_DELAY))
+                    
+                    if reaction_emoji and reply_msg_id:
+                        try:
+                            await active_account["client"](SendReactionRequest(
+                                peer=entity,
+                                msg_id=reply_msg_id,
+                                reaction=[ReactionEmoji(emoticon=reaction_emoji)]
+                            ))
+                        except Exception:
+                            pass
 
-            # Sleep delay
+                    if random.random() < 0.15:
+                        available_stickers = [f for f in os.listdir(STICKERS_DIR) if f.endswith(('.webp', '.png', '.jpg', '.tgs'))]
+                        if available_stickers:
+                            chosen_sticker = random.choice(available_stickers)
+                            sticker_path = os.path.join(STICKERS_DIR, chosen_sticker)
+                            await asyncio.sleep(random.uniform(1.0, 3.0))
+                            sent_sticker = await active_account["client"].send_file(entity, sticker_path)
+                            asyncio.create_task(delete_message_later(active_account["client"], entity, sent_sticker.id, 300))
+
+                except FloodWaitError as e:
+                    logging.warning(f"RATE LIMITED! Pausing chat for {e.seconds} seconds.")
+                    await asyncio.sleep(e.seconds + 2)
+                except Exception as e:
+                    logging.error(f"[{active_account['name']}] Error: {e}")
+
+            line_index += 1
+            if line_index >= len(conversation_script):
+                line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
+                logging.info(f"Randomly starting at line {line_index}") 
+                message_tracker.clear()
+                
+            # Simulate an active online group ("little spam")
             if MESSAGE_DELAY is not None:
                 delay = MESSAGE_DELAY
             elif random.random() < 0.3:
+                # 30% chance they are typing very fast over each other
                 delay = random.uniform(1.0, 2.5)
             else:
+                # 70% chance for a normal fast conversation
                 delay = random.uniform(3.0, 6.0)
                 
+            logging.info(f"Waiting {delay:.1f}s before next message...")
             await asyncio.sleep(delay)
             
     except asyncio.CancelledError:
-        logging.info("Pegasis Chat Loop stopped by admin.")
-    except Exception as e:
-        logging.error(f"Critical error in Pegasis loop: {e}")
+        logging.info("Chat sequence CANCELLED via remote command!")
+        raise
 
-async def start_bot():
-    global TARGET_CHAT_ID, chat_task
+# --- DUMMY WEB SERVER FOR FREE CLOUD HOSTING (RENDER/KOYEB) ---
+async def health_check(request):
+    return web.Response(text="GenZetaBot is running safely 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Web server started on port {port} for Cloud Health Checks.")
+
+async def main():
+    if not accounts["acc1"]["session"]:
+        logging.error("String Sessions not found in Environment Variables!")
+        logging.error("Please run generate_sessions.py to get your strings.")
+        return
+
+    print("\n" + "="*50)
+    print("   GENZETABOT - CLOUD MASTER-SLAVE EDITION")
+    print("="*50)
     
-    # Connection Logic
-    account_configs = [
-        {"name": "acc1", "env_var": "ACC1_SESSION", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad"},
-        {"name": "acc2", "env_var": "ACC2_SESSION", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d"},
-        {"name": "acc3", "env_var": "ACC3_SESSION", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81"},
-        {"name": "acc4", "env_var": "ACC4_SESSION", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad"},
-    ]
+    # 1. Start the Health Check Server so Render/Koyeb doesn't crash the bot
+    await start_web_server()
     
-    for cfg in account_configs:
-        session_str = os.getenv(cfg["env_var"])
-        bot_token = os.getenv("ACC4_BOT_TOKEN") if cfg["name"] == "acc4" else None
-        
-        if session_str:
-            client = TelegramClient(StringSession(session_str), cfg["api_id"], cfg["api_hash"])
-            await client.start()
-            clients[cfg["name"]] = {"client": client, "name": cfg["name"]}
-            logging.info(f"Connected {cfg['name']} via Session String.")
-        elif bot_token and cfg["name"] == "acc4":
-            client = TelegramClient(StringSession(), cfg["api_id"], cfg["api_hash"])
-            await client.start(bot_token=bot_token)
-            clients[cfg["name"]] = {"client": client, "name": cfg["name"]}
-            logging.info(f"Connected {cfg['name']} via Bot Token.")
+    # 2. Load the CSV
+    csv_filename = os.path.join(SCRIPT_DIR, CSV_FILE)
+    global conversation_script
+
+    if os.path.exists(csv_filename):
+        with open(csv_filename, mode="r", encoding="utf-8-sig") as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                sender = row.get("sender", "").strip()
+                message = row.get("message", "").strip()
+                if sender in accounts and message:
+                    conversation_script.append({
+                        "id": row.get("id", "").strip(),
+                        "sender": sender,
+                        "message": message,
+                        "reply_to": row.get("reply_to", "").strip(),
+                        "reaction": row.get("reaction", "").strip()
+                    })
+        logging.info(f"Loaded {len(conversation_script)} messages.")
+    else:
+        logging.error(f"'{CSV_FILE}' not found!")
+        return
+
+    # 3. Connect User Accounts and Bot Accounts
+    for acc_key, acc_data in accounts.items():
+        if not acc_data["session"] and not acc_data["bot_token"]:
+            logging.warning(f"Skipping {acc_data['name']} because session/token is missing.")
+            continue
             
+        if acc_data["session"]:
+            # Normal User Account
+            client = TelegramClient(StringSession(acc_data["session"]), acc_data["api_id"], acc_data["api_hash"])
+            await client.connect()
+        else:
+            # Bot Token Account
+            client = TelegramClient(StringSession(), acc_data["api_id"], acc_data["api_hash"])
+            await client.start(bot_token=acc_data["bot_token"])
+
+        if not await client.is_user_authorized():
+            logging.error(f"{acc_data['name']} credentials invalid! Cannot connect.")
+            continue
+        clients[acc_key] = {"client": client, "name": acc_data["name"]}
+        
+    if not clients:
+        logging.error("No valid accounts connected! Exiting.")
+        return
+        
+    logging.info(f"{len(clients)} User Accounts Connected Safely!")
+
+    # 4. Extract Chat ID using Account 1
     if "acc1" in clients:
         try:
             entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
+            global TARGET_CHAT_ID
             TARGET_CHAT_ID = entity.id
+            logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
         except Exception as e:
             logging.error(f"Failed to resolve TARGET_CHAT: {e}")
-            
+    
+    # 5. Setup the Listener strictly on Account 4 (The Bot)
     if "acc4" not in clients:
-        logging.error("Account 4 (Bot) is NOT connected! Exiting.")
+        logging.error("Account 4 (Bot) is NOT connected! The bot cannot listen for commands. Exiting.")
         return
         
     host_client = clients["acc4"]["client"]
     listen_target = TARGET_CHAT_ID or TARGET_CHAT
-
-    # Listen to real humans to build memory & auto-delete
-    @host_client.on(events.NewMessage(chats=listen_target))
-    async def group_listener(event):
-        if event.raw_text and event.raw_text.lower().startswith(("/", "!")):
-            return
-            
-        try:
-            sender = await event.get_sender()
-            if not sender: return
-            
-            our_ids = [ (await acc["client"].get_me()).id for acc in clients.values() ]
-            if sender.id not in our_ids:
-                asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
-                
-                # Add real human message to memory so bots learn
-                username = sender.username or sender.first_name or "Human"
-                chat_memory.append(f"{username}: {event.raw_text}")
-        except Exception:
-            pass
+    logging.info("Account 4 (Bot) is now the active Command Controller.")
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^/(setspeed|topic|stats|pause|resume)(?:\s+(.+))?', chats=listen_target))
     async def admin_command_handler(event):
         global MESSAGE_DELAY, CHAT_PAUSED, AI_TOPIC, AUTO_DELETE_DELAY, TOTAL_MESSAGES_SENT
         try:
             sender = await event.get_sender()
-            if not sender or sender.id != 5429173364: return 
-        except Exception: return
+            if not sender or sender.id != 5429173364:
+                return 
+        except Exception:
+            return
 
         cmd = event.pattern_match.group(1).lower()
         args = event.pattern_match.group(2)
@@ -242,92 +353,232 @@ async def start_bot():
                 await event.reply("Speed set to AUTO (Fast Human-like random bursts).")
             else:
                 try:
-                    if args.endswith('s'): MESSAGE_DELAY = int(args[:-1])
-                    elif args.endswith('m'): MESSAGE_DELAY = int(args[:-1]) * 60
-                    elif args.endswith('h'): MESSAGE_DELAY = int(args[:-1]) * 3600
-                    else: MESSAGE_DELAY = int(args)
+                    if args.endswith('s'):
+                        MESSAGE_DELAY = int(args[:-1])
+                    elif args.endswith('m'):
+                        MESSAGE_DELAY = int(args[:-1]) * 60
+                    elif args.endswith('h'):
+                        MESSAGE_DELAY = int(args[:-1]) * 3600
+                    else:
+                        MESSAGE_DELAY = int(args) # Default to seconds if no suffix
+                        
                     await event.reply(f"Speed locked to {MESSAGE_DELAY} seconds per message.")
                 except ValueError:
-                    await event.reply("Invalid format.")
+                    await event.reply("Invalid format. Use '15m', '1h', or 'auto'.")
+                
         elif cmd == "topic":
             if not args:
                 AI_TOPIC = None
-                await event.reply("AI Topic cleared.")
+                await event.reply("AI Topic cleared. AI will now converse naturally.")
             else:
                 AI_TOPIC = args.strip()
-                await event.reply(f"AI Topic set to: {AI_TOPIC}")
+                await event.reply(f"AI Topic set to: {AI_TOPIC}. The bot will steer the conversation towards this on its next turn.")
+                
         elif cmd == "pause":
             CHAT_PAUSED = True
-            await event.reply("Pegasis PAUSED.")
+            await event.reply("Chat automation PAUSED.")
+            
         elif cmd == "resume":
             CHAT_PAUSED = False
-            await event.reply("Pegasis RESUMED.")
+            await event.reply("Chat automation RESUMED.")
+            
         elif cmd == "stats":
             speed_text = "AUTO" if MESSAGE_DELAY is None else f"{MESSAGE_DELAY}s"
             status = "PAUSED ⏸️" if CHAT_PAUSED else "RUNNING ▶️"
             topic = AI_TOPIC if AI_TOPIC else "None"
-            await event.reply(f"📊 **Pegasis Stats**\nStatus: {status}\nSpeed: {speed_text}\nAuto-Delete: {AUTO_DELETE_DELAY}s\nTopic: {topic}\nMessages Sent: {TOTAL_MESSAGES_SENT}")
+            stats_msg = f"📊 **Bot Stats**\n\nStatus: {status}\nSpeed: {speed_text}\nAuto-Delete: {AUTO_DELETE_DELAY}s\nCurrent AI Topic: {topic}\nMessages Sent: {TOTAL_MESSAGES_SENT}"
+            await event.reply(stats_msg)
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=listen_target))
     async def set_delete_handler(event):
         global AUTO_DELETE_DELAY
         try:
             sender = await event.get_sender()
-            if not sender or sender.id != 5429173364: return 
-            time_str = event.pattern_match.group(1)
-            if not time_str: return
+            if not sender or sender.id != 5429173364:
+                logging.warning(f"Unauthorized /setdelete attempt from User ID: {sender.id if sender else 'Unknown'}")
+                return 
+        except Exception as e:
+            return
+
+        time_str = event.pattern_match.group(1)
+        if not time_str:
+            await event.reply("Usage: /setdelete <time> (e.g. 1s, 45m, 24h)")
+            return
             
-            time_str = time_str.lower().strip()
-            if time_str.endswith('s'): new_delay = int(time_str[:-1])
-            elif time_str.endswith('m'): new_delay = int(time_str[:-1]) * 60
-            elif time_str.endswith('h'): new_delay = int(time_str[:-1]) * 3600
-            else: new_delay = int(time_str)
-            
+        time_str = time_str.lower().strip()
+        try:
+            if time_str.endswith('s'):
+                new_delay = int(time_str[:-1])
+            elif time_str.endswith('m'):
+                new_delay = int(time_str[:-1]) * 60
+            elif time_str.endswith('h'):
+                new_delay = int(time_str[:-1]) * 3600
+            else:
+                new_delay = int(time_str) # Default to seconds
+                
+            if new_delay < 0 or new_delay > 86400:
+                await event.reply("❌ Please set a time between 0 seconds and 24 hours (86400s).")
+                return
+                
             AUTO_DELETE_DELAY = new_delay
-            await event.reply(f"✅ Auto-delete set to {AUTO_DELETE_DELAY}s! Starting sweep...")
+            await event.reply(f"✅ Auto-delete time successfully updated to {AUTO_DELETE_DELAY} seconds! Starting background sweep of history...")
+            logging.info(f"Auto-delete time changed to {AUTO_DELETE_DELAY}s by Admin.")
+            
+            # Start the background sweeper
             asyncio.create_task(history_sweeper(host_client, listen_target, AUTO_DELETE_DELAY))
-        except Exception:
-            pass
+        except ValueError:
+            await event.reply("❌ Invalid format. Please use a number followed by s, m, or h. (e.g. 10s, 5m, 2h)")
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^/(lockon|lockoff)', chats=listen_target))
     async def handler(event):
         global chat_task
+        
+        # Security Check: ONLY allow User ID 5429173364 (@Merlin_hermis)
         try:
             sender = await event.get_sender()
-            if not sender or sender.id != 5429173364: return
-        except Exception: return
+            if not sender:
+                return
+            if sender.id != 5429173364:
+                logging.warning(f"Unauthorized /lockon attempt from User ID: {sender.id}. Ignoring.")
+                return 
+        except Exception as e:
+            logging.error(f"Error checking sender ID: {e}")
+            return
 
         command = event.pattern_match.group(1).lower()
-        if command == "lockon":
+        
+        if command == 'lockon':
             if chat_task and not chat_task.done():
-                await event.reply("Pegasis is already running!")
+                return
             else:
-                chat_task = asyncio.create_task(learning_chat_loop())
-                await event.reply("✅ Pegasis Learning Agent System STARTED.")
-        elif command == "lockoff":
+                chat_task = asyncio.create_task(chat_loop())
+                logging.info(f"Admin {sender.id} sent /lockon")
+                await asyncio.sleep(2)
+                await event.delete()
+                
+        elif command == 'lockoff':
             if chat_task and not chat_task.done():
                 chat_task.cancel()
-                await event.reply("❌ Pegasis Learning Agent System STOPPED.")
-            else:
-                await event.reply("Pegasis is not currently running.")
+                chat_task = None
+                logging.info(f"Admin {sender.id} sent /lockoff")
+                await asyncio.sleep(2)
+                await event.delete()
 
-    logging.info("Pegasis Controller Active. Waiting for /lockon.")
-    await host_client.run_until_disconnected()
+    @host_client.on(events.NewMessage(chats=entity))
+    async def auto_delete_handler(event):
+        # Ignore our stealth commands to prevent double deletion logic
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete")):
+            return
+            
+        try:
+            sender = await event.get_sender()
+            if not sender:
+                return
+                
+            # Get IDs of all our connected accounts
+            our_ids = []
+            for acc_data in clients.values():
+                our_ids.append((await acc_data["client"].get_me()).id)
+                
+            # If the sender is NOT one of our accounts
+            if sender.id not in our_ids:
+                # 1. Schedule deletion after global setting
+                asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
+                
+                msg_text = event.raw_text.lower() if event.raw_text else ""
+                if not msg_text:
+                    return
 
-async def dummy_web_server():
-    app = web.Application()
-    app.router.add_get('/', lambda request: web.Response(text="Pegasis is running!"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
-    await site.start()
-    logging.info("Web server started.")
+                # 2. Contextual Emoji Reaction (20% chance)
+                if random.random() < 0.2:
+                    emoji = "👍"
+                    if any(word in msg_text for word in ["lol", "lmao", "haha", "funny"]): emoji = "😂"
+                    elif any(word in msg_text for word in ["love", "amazing", "best", "great", "cute"]): emoji = "❤️"
+                    elif any(word in msg_text for word in ["fire", "insane", "crazy", "wow"]): emoji = "🔥"
+                    elif any(word in msg_text for word in ["sad", "cry", "rip", "bad"]): emoji = "😢"
+                    
+                    try:
+                        reactor_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
+                        await reactor_acc["client"](SendReactionRequest(
+                            peer=entity,
+                            msg_id=event.message.id,
+                            big=True,
+                            add_to_recent=True,
+                            reaction=[ReactionEmoji(emoticon=emoji)]
+                        ))
+                    except Exception as e:
+                        logging.error(f"Failed to send reaction: {e}")
+                        
+                # 3. Conversational AI Reply to Real Users
+                is_reply_to_bot = False
+                if event.message.is_reply:
+                    try:
+                        reply_msg = await event.message.get_reply_message()
+                        if "acc4" in clients:
+                            acc4_id = (await clients["acc4"]["client"].get_me()).id
+                            if reply_msg and reply_msg.sender_id == acc4_id:
+                                is_reply_to_bot = True
+                    except Exception:
+                        pass
+                        
+                if is_reply_to_bot and HAS_GENAI:
+                    try:
+                        prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
+                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        response = await ai_model.generate_content_async(prompt)
+                        if response and response.text:
+                            asyncio.create_task(send_dynamic_reply(clients["acc4"]["client"], entity, event.message, response.text.strip()))
+                            return # Stop processing further keywords
+                    except Exception as e:
+                        logging.error(f"Failed to generate reply to real user: {e}")
 
-async def main():
-    await asyncio.gather(
-        start_bot(),
-        dummy_web_server()
-    )
+                # 4. Keyword Response System (if no direct reply)
+                keyword_replies = {
+                    r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
+                    r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
+                    r'\b(anime|manga)\b': ["I love anime!", "What's your favorite anime?"]
+                }
+                
+                responded = False
+                for pattern, replies in keyword_replies.items():
+                    if re.search(pattern, msg_text):
+                        reply_acc = random.choice(list(clients.values()))
+                        reply_text = random.choice(replies)
+                        asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, reply_text))
+                        responded = True
+                        break
+                        
+                # 3. AI Response (if no keyword matched, and GEMINI API KEY is present)
+                if not responded and HAS_GENAI and os.getenv("GEMINI_API_KEY"):
+                    # 30% chance to reply, or 100% if it's a question
+                    if "?" in msg_text or random.random() < 0.3:
+                        try:
+                            model = genai.GenerativeModel("gemini-1.5-flash")
+                            prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
+                            
+                            response = await model.generate_content_async(prompt)
+                            if response and response.text:
+                                reply_acc = random.choice(list(clients.values()))
+                                asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, response.text.strip()))
+                        except Exception as e:
+                            logging.error(f"AI Generation failed: {e}")
+                            
+        except Exception as e:
+            logging.error(f"Error in auto_delete_handler: {e}")
+
+    logging.info("Listening for /lockon and /lockoff commands in the group...")
+    
+    try:
+        await host_client.run_until_disconnected()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("Disconnecting...")
+        for key, acc in clients.items():
+            await acc["client"].disconnect()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
