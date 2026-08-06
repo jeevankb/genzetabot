@@ -155,7 +155,7 @@ async def chat_loop():
                         # Generate Conversational AI response based on previous message
                         if HAS_GENAI and os.getenv("GEMINI_API_KEY") and last_sent_text:
                             try:
-                                ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                                ai_model = genai.GenerativeModel("gemini-2.5-flash")
                                 prompt = f"You are an anime fan in a group chat. Respond naturally, casually, and shortly (1 sentence max) to this group message: '{last_sent_text}'"
                                 if AI_TOPIC:
                                     prompt += f" Critically, try to naturally steer the conversation towards this topic: {AI_TOPIC}"
@@ -522,7 +522,7 @@ async def main():
                 if is_reply_to_bot and HAS_GENAI and os.getenv("GEMINI_API_KEY"):
                     try:
                         prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        ai_model = genai.GenerativeModel("gemini-2.5-flash")
                         response = await ai_model.generate_content_async(prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(clients["acc4"]["client"], entity, event.message, response.text.strip()))
@@ -552,7 +552,7 @@ async def main():
                     if "?" in msg_text or random.random() < 0.3:
                         try:
                             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                            model = genai.GenerativeModel("gemini-1.5-flash")
+                            model = genai.GenerativeModel("gemini-2.5-flash")
                             prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
                             
                             response = await model.generate_content_async(prompt)
