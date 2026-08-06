@@ -122,6 +122,7 @@ async def chat_loop():
     logging.info(f"Randomly starting at line {line_index}")
     message_tracker = {}
     
+    last_sent_text = ""
     try:
         while True:
             if CHAT_PAUSED:
