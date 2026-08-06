@@ -326,7 +326,7 @@ async def main():
     listen_target = TARGET_CHAT_ID or TARGET_CHAT
     logging.info("Account 4 (Bot) is now the active Command Controller.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^/(setspeed|topic|stats|pause|resume)(?:\s+(.+))?', chats=listen_target))
+    @host_client.on(events.NewMessage(pattern=r'(?i)^/(setspeed|topic|stats|pause|resume|purge)(?:\s+(.+))?', chats=listen_target))
     async def admin_command_handler(event):
         global MESSAGE_DELAY, CHAT_PAUSED, AI_TOPIC, AUTO_DELETE_DELAY, TOTAL_MESSAGES_SENT
         try:
@@ -372,6 +372,26 @@ async def main():
             status = "PAUSED ⏸️" if CHAT_PAUSED else "RUNNING ▶️"
             topic = AI_TOPIC if AI_TOPIC else "None"
             await event.reply(f"📊 **Bot Stats**\n\nStatus: {status}\nSpeed: {speed_text}\nAuto-Delete: {AUTO_DELETE_DELAY}s\nCurrent AI Topic: {topic}\nMessages Sent: {TOTAL_MESSAGES_SENT}")
+        elif cmd == "purge":
+            await event.reply("🗑️ Sweeping all bot and AI messages from this chat...")
+            try:
+                our_ids = [(await acc["client"].get_me()).id for acc in clients.values()]
+                deleted_count = 0
+                messages_to_delete = []
+                async for msg in host_client.iter_messages(listen_target):
+                    if msg.sender_id in our_ids:
+                        messages_to_delete.append(msg.id)
+                        if len(messages_to_delete) >= 100:
+                            await host_client.delete_messages(listen_target, messages_to_delete)
+                            deleted_count += len(messages_to_delete)
+                            messages_to_delete.clear()
+                            await asyncio.sleep(2.0)
+                if messages_to_delete:
+                    await host_client.delete_messages(listen_target, messages_to_delete)
+                    deleted_count += len(messages_to_delete)
+                await event.respond(f"✅ Successfully scrubbed {deleted_count} messages.")
+            except Exception as e:
+                await event.respond(f"❌ Failed to purge messages: {e}")
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^/setdelete(?:\s+(.+))?', chats=listen_target))
     async def set_delete_handler(event):
