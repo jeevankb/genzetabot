@@ -165,23 +165,23 @@ async def start_bot():
     
     # Connection Logic
     account_configs = [
-        {"name": "acc1", "env_var": "SESSION_STRING_1"},
-        {"name": "acc2", "env_var": "SESSION_STRING_2"},
-        {"name": "acc3", "env_var": "SESSION_STRING_3"},
-        {"name": "acc4", "env_var": "SESSION_STRING_4"},
+        {"name": "acc1", "env_var": "ACC1_SESSION", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad"},
+        {"name": "acc2", "env_var": "ACC2_SESSION", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d"},
+        {"name": "acc3", "env_var": "ACC3_SESSION", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81"},
+        {"name": "acc4", "env_var": "ACC4_SESSION", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad"},
     ]
     
     for cfg in account_configs:
         session_str = os.getenv(cfg["env_var"])
-        bot_token = os.getenv("BOT_TOKEN") if cfg["name"] == "acc4" else None
+        bot_token = os.getenv("ACC4_BOT_TOKEN") if cfg["name"] == "acc4" else None
         
         if session_str:
-            client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+            client = TelegramClient(StringSession(session_str), cfg["api_id"], cfg["api_hash"])
             await client.start()
             clients[cfg["name"]] = {"client": client, "name": cfg["name"]}
             logging.info(f"Connected {cfg['name']} via Session String.")
         elif bot_token and cfg["name"] == "acc4":
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            client = TelegramClient(StringSession(), cfg["api_id"], cfg["api_hash"])
             await client.start(bot_token=bot_token)
             clients[cfg["name"]] = {"client": client, "name": cfg["name"]}
             logging.info(f"Connected {cfg['name']} via Bot Token.")
