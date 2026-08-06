@@ -57,6 +57,7 @@ def load_csv():
 bot_active = False
 message_speed = 15
 delete_delay = 360  # Default 6 minutes
+total_messages_sent = 0
 clients = {}
 
 def parse_time_to_seconds(time_str):
@@ -109,9 +110,11 @@ async def history_sweeper(client, chat_entity, delay_seconds):
         logging.error(f"Error in history sweeper: {e}")
 
 async def send_dynamic_reply(client, entity, target_msg, text):
+    global total_messages_sent
     await asyncio.sleep(random.uniform(3.0, 7.0))
     try:
         sent_msg = await client.send_message(entity, text, reply_to=target_msg)
+        total_messages_sent += 1
         if delete_delay > 0:
             asyncio.create_task(delete_message_later(client, entity, sent_msg.id, delete_delay))
         logging.info(f"Sent dynamic reply: {text}")
@@ -119,6 +122,15 @@ async def send_dynamic_reply(client, entity, target_msg, text):
         logging.error(f"Failed to send dynamic reply: {e}")
 
 def setup_commands(bot_client):
+    @bot_client.on(events.NewMessage(pattern='(?i)^/stats(?:@genzetabot)?$'))
+    async def stats_handler(event):
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
+                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {delete_delay}s\nMessages Sent: {total_messages_sent}")
+        except: pass
+
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         global bot_active
@@ -182,6 +194,21 @@ def setup_commands(bot_client):
             our_ids = []
             for acc_data in clients.values():
                 our_ids.append((await acc_data["client"].get_me()).id)
+                
+            # If a bot speaks
+            if sender.id in our_ids:
+                if random.random() < 0.15:
+                    try:
+                        emoji = random.choice(["👍", "😂", "❤️", "🔥", "🤔", "👀", "👌", "✨"])
+                        reactor_acc = random.choice([c for k, c in clients.items() if k != "acc4" and (await c["client"].get_me()).id != sender.id])
+                        entity = await bot_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                        await reactor_acc["client"](SendReactionRequest(
+                            peer=entity,
+                            msg_id=event.message.id,
+                            reaction=[ReactionEmoji(emoticon=emoji)]
+                        ))
+                    except: pass
+                return
                 
             # If a human speaks
             if sender.id not in our_ids:
@@ -296,6 +323,9 @@ async def chat_loop():
                 
                 sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
                 logging.info(f"[{name}] Sent: {msg_text}")
+                
+                global total_messages_sent
+                total_messages_sent += 1
                 
                 if csv_id:
                     message_tracker[csv_id] = sent_msg.id
