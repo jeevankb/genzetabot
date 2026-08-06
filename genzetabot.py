@@ -127,10 +127,13 @@ async def learning_chat_loop():
                 msg_text = "I don't know what to say right now."
                 
             try:
-                async with client.action(chat_target, 'typing'):
+                # Let THIS specific account fetch its own entity from its local SQLite cache
+                my_entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                
+                async with client.action(my_entity, 'typing'):
                     await asyncio.sleep(random.uniform(2.0, 5.0))
                 
-                sent_msg = await client.send_message(chat_target, msg_text)
+                sent_msg = await client.send_message(my_entity, msg_text)
                 TOTAL_MESSAGES_SENT += 1
                 logging.info(f"[{name}] Generated and Sent: {msg_text}")
                 
