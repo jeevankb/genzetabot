@@ -187,7 +187,7 @@ async def chat_loop():
                                 prompt += f"\nCurrent Emotion vibe: {emotion}"
                                 
                             try:
-                                ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                                ai_model = genai.GenerativeModel("gemini-2.5-flash")
                                 response = await ai_model.generate_content_async(prompt)
                                 if response and response.text:
                                     bot_msg = response.text.strip().replace('"', '')
@@ -442,7 +442,7 @@ async def main():
                         acc4_id = (await clients["acc4"]["client"].get_me()).id
                         if reply_msg and reply_msg.sender_id == acc4_id:
                             prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                            ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                            ai_model = genai.GenerativeModel("gemini-2.5-flash")
                             response = await ai_model.generate_content_async(prompt)
                             if response and response.text:
                                 asyncio.create_task(send_dynamic_reply(clients["acc4"]["client"], entity, event.message, response.text.strip()))
