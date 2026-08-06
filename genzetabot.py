@@ -193,14 +193,16 @@ async def chat_loop():
                                     bot_msg = response.text.strip().replace('"', '')
                                     bot_client = clients["acc4"]["client"]
                                     
-                                    async with bot_client.action(entity, 'typing'):
+                                    # Fix: Don't share 'entity' object across clients. Use raw ID.
+                                    chat_target = TARGET_CHAT_ID or TARGET_CHAT
+                                    async with bot_client.action(chat_target, 'typing'):
                                         await asyncio.sleep(min(max(len(bot_msg) * 0.05, 1.0), 3.0))
                                         
-                                    bot_sent_msg = await bot_client.send_message(entity, bot_msg, reply_to=sent_msg.id)
+                                    bot_sent_msg = await bot_client.send_message(chat_target, bot_msg, reply_to=sent_msg.id)
                                     logging.info(f"[Account 4 (Bot)] Sent Dynamic AI Reply: {bot_msg}")
                                     chat_memory.append(f"Account 4: {bot_msg}")
                                     TOTAL_MESSAGES_SENT += 1
-                                    asyncio.create_task(delete_message_later(bot_client, entity, bot_sent_msg.id, AUTO_DELETE_DELAY))
+                                    asyncio.create_task(delete_message_later(bot_client, chat_target, bot_sent_msg.id, AUTO_DELETE_DELAY))
                             except Exception as e:
                                 logging.error(f"Account 4 AI Generation failed: {e}")
                                 
