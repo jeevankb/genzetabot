@@ -1,0 +1,45 @@
+conversation_id,message_id,timestamp,sender,receiver,chat_type,language,topic,message,reply_to,emotion
+2001,1,2026-08-07 10:15:00,Account1,Group,group,Hinglish,Morning,"Oye uth gaye kya sab log?",,neutral
+2001,2,2026-08-07 10:16:12,Account2,Group,group,English,Morning,"barely alive bro",1,tired
+2001,3,2026-08-07 10:17:30,Account3,Group,group,Kannada,College,"class ge bartidira ilwa?",,neutral
+2001,4,2026-08-07 10:18:05,Account1,Group,group,Mixed,College,"bunk madona macha, neend aa rahi hai",3,sleepy
+2001,5,2026-08-07 10:20:10,Account2,Group,group,Hinglish,College,"arre attendance short ho jayega 💀",4,worried
+2001,6,2026-08-07 10:21:00,Account3,Group,group,English,College,"fr proxy laga dena",,neutral
+2001,7,2026-08-07 10:21:45,Account1,Group,group,Mixed,College,"Yen guru proxy allowed illa eega, strict madam aagidare",6,annoyed
+2001,8,2026-08-07 10:25:20,Account2,Group,group,Hinglish,College,"thik hai chalo nikalte fir",,sad
+2001,9,2026-08-07 10:27:00,Account3,Group,group,English,College,"coming. 2 min.",8,neutral
+2002,1,2026-08-07 14:30:10,Account2,Group,group,Hinglish,Anime,"Bhai JJK ka naya manga chapter padha kisi ne??",,excited
+2002,2,2026-08-07 14:31:05,Account3,Group,group,English,Anime,"no spoilers plz haven't read yet",1,worried
+2002,3,2026-08-07 14:31:50,Account1,Group,group,Kannada,Anime,"Gojo comeback confirmed? 😂",1,funny
+2002,4,2026-08-07 14:33:15,Account2,Group,group,Mixed,Anime,"bro gege is cooking crazy rn fr",,excited
+2002,5,2026-08-07 14:35:00,Account3,Group,group,English,Anime,"brb need to read it right now",,rushed
+2002,6,2026-08-07 14:40:22,Account1,Group,group,Hinglish,Food,"waise bhook lag rahi hai, kya khaye?",,hungry
+2002,7,2026-08-07 14:42:10,Account2,Group,group,Kannada,Food,"biryani order madona",6,happy
+2002,8,2026-08-07 14:43:05,Account1,Group,group,Hinglish,Food,"done bhai, paise tu dede",7,funny
+2002,9,2026-08-07 14:44:00,Account2,Group,group,English,Food,"💀💀",8,annoyed
+2003,1,2026-08-07 19:10:00,Account3,Group,group,English,Coding,"is anyone good at python? getting weird syntax error",,confused
+2003,2,2026-08-07 19:12:15,Account1,Group,group,Mixed,Coding,"Yen error macha kalsu",1,helpful
+2003,3,2026-08-07 19:13:00,Account3,Group,group,English,Coding,"indentation error everywhere man idk",2,annoyed
+2003,4,2026-08-07 19:14:20,Account2,Group,group,Hinglish,Coding,"lol tab vs spaces hoga pakka",3,funny
+2003,5,2026-08-07 19:15:05,Account1,Group,group,English,Coding,"just ask chatgpt bro 😂",,funny
+2003,6,2026-08-07 19:16:30,Account3,Group,group,Hinglish,Coding,"arre chatgpt paid limit khatam ho gaya mera",5,sad
+2003,7,2026-08-07 19:18:00,Account2,Group,group,Kannada,Coding,"banni naange code kalsi, nodtini",6,helpful
+2003,8,2026-08-07 19:20:12,Account3,Group,group,English,Coding,"sending on dm thanks macha",7,happy
+2004,1,2026-08-07 22:05:00,Account1,Group,group,Hinglish,Gaming,"BGMI aaja jaldi",,excited
+2004,2,2026-08-07 22:06:10,Account2,Group,group,English,Gaming,"office call man, can't",1,annoyed
+2004,3,2026-08-07 22:07:30,Account3,Group,group,Kannada,Gaming,"naan ready banni",1,excited
+2004,4,2026-08-07 22:08:45,Account1,Group,group,Hinglish,Gaming,"@Account2 itni raat ko kiska call bhai",2,confused
+2004,5,2026-08-07 22:10:00,Account2,Group,group,Mixed,Gaming,"US client meeting guru 😭 zindagi jhand hai",4,sad
+2004,6,2026-08-07 22:11:15,Account3,Group,group,English,Gaming,"lmao RIP bro, you earn in dollars tho",5,funny
+2004,7,2026-08-07 22:12:00,Account2,Group,group,Hinglish,Gaming,"Ghanta dollars, peanuts mil rahe hai",6,angry
+2004,8,2026-08-07 22:14:10,Account1,Group,group,Mixed,Gaming,"lol okay okay chill, naavu start madtivi",,neutral
+2004,9,2026-08-07 22:15:30,Account3,Group,group,English,Gaming,"invite sent",8,neutral
+2005,1,2026-08-08 00:30:12,Account2,Group,group,English,Night,"can't sleep...",,tired
+2005,2,2026-08-08 00:45:00,Account3,Group,group,Kannada,Night,"nidde barthilla nange kuda",1,tired
+2005,3,2026-08-08 00:46:15,Account2,Group,group,Hinglish,Movies,"netflix pe kuch accha hai kya dekhne ke liye?",,bored
+2005,4,2026-08-08 00:50:30,Account1,Group,group,Mixed,Movies,"macha watch Vinland Saga, thindigide fr",3,excited
+2005,5,2026-08-08 00:52:10,Account3,Group,group,Hinglish,Movies,"arre usko anime nahi pasand bhai",4,neutral
+2005,6,2026-08-08 00:54:05,Account2,Group,group,English,Movies,"yeah idk anime isn't my thing",5,neutral
+2005,7,2026-08-08 00:56:00,Account1,Group,group,Hinglish,Movies,"bhai tu ek baar try toh kar, sachi god tier hai",6,passionate
+2005,8,2026-08-08 01:00:15,Account2,Group,group,Mixed,Movies,"ok fine i'll watch 1 ep. gn for now",7,tired
+2005,9,2026-08-08 01:02:00,Account3,Group,group,English,Night,"gn tc",8,happy
