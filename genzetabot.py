@@ -4,6 +4,7 @@ import csv
 import random
 import logging
 import re
+import datetime
 from collections import defaultdict
 from aiohttp import web
 from dotenv import load_dotenv
@@ -79,6 +80,28 @@ async def delete_other_message(message, delay):
         logging.info(f"Deleted a group member's message after {delay} seconds.")
     except Exception as e:
         logging.error(f"Failed to delete member's message: {e}")
+
+async def history_sweeper(client, chat_entity, delay_seconds):
+    try:
+        logging.info(f"Starting background history sweeper for messages older than {delay_seconds}s...")
+        cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=delay_seconds)
+        
+        messages_to_delete = []
+        async for msg in client.iter_messages(chat_entity, offset_date=cutoff_date):
+            messages_to_delete.append(msg.id)
+            if len(messages_to_delete) >= 100:
+                await client.delete_messages(chat_entity, messages_to_delete)
+                logging.info("Sweeper deleted 100 historical messages...")
+                messages_to_delete.clear()
+                await asyncio.sleep(2.0)
+                
+        if messages_to_delete:
+            await client.delete_messages(chat_entity, messages_to_delete)
+            logging.info(f"Sweeper deleted final {len(messages_to_delete)} historical messages.")
+            
+        logging.info("History sweeper finished successfully.")
+    except Exception as e:
+        logging.error(f"Error in history sweeper: {e}")
 
 async def send_dynamic_reply(client, entity, target_msg, text):
     # Wait a few seconds to look like a human typing
@@ -394,8 +417,11 @@ async def main():
                 return
                 
             AUTO_DELETE_DELAY = new_delay
-            await event.reply(f"✅ Auto-delete time successfully updated to {AUTO_DELETE_DELAY} seconds!")
+            await event.reply(f"✅ Auto-delete time successfully updated to {AUTO_DELETE_DELAY} seconds! Starting background sweep of history...")
             logging.info(f"Auto-delete time changed to {AUTO_DELETE_DELAY}s by Admin.")
+            
+            # Start the background sweeper
+            asyncio.create_task(history_sweeper(host_client, listen_target, AUTO_DELETE_DELAY))
         except ValueError:
             await event.reply("❌ Invalid format. Please use a number followed by s, m, or h. (e.g. 10s, 5m, 2h)")
 
