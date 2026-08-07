@@ -78,32 +78,32 @@ async def delete_message_later(client, chat_id, message_id, delay):
     except:
         pass
 
-async def delete_other_message(message, delay):
-    if delay <= 0: return
-    await asyncio.sleep(delay)
-    try:
-        await message.delete()
-        logging.info(f"Deleted a group member's message after {delay} seconds.")
-    except Exception as e:
-        pass
 
 async def history_sweeper(client, chat_entity, delay_seconds):
     try:
-        logging.info(f"Starting background history sweeper for messages older than {delay_seconds}s...")
+        logging.info(f"Starting background history sweeper for bot messages older than {delay_seconds}s...")
         cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=delay_seconds)
         
+        our_ids = []
+        for acc_data in clients.values():
+            try:
+                our_ids.append((await acc_data["client"].get_me()).id)
+            except: pass
+            
         messages_to_delete = []
         async for msg in client.iter_messages(chat_entity, offset_date=cutoff_date):
-            messages_to_delete.append(msg.id)
+            if msg.sender_id in our_ids:
+                messages_to_delete.append(msg.id)
+                
             if len(messages_to_delete) >= 100:
                 await client.delete_messages(chat_entity, messages_to_delete)
-                logging.info("Sweeper deleted 100 historical messages...")
+                logging.info("Sweeper deleted 100 historical bot messages...")
                 messages_to_delete.clear()
                 await asyncio.sleep(2.0)
                 
         if messages_to_delete:
             await client.delete_messages(chat_entity, messages_to_delete)
-            logging.info(f"Sweeper deleted final {len(messages_to_delete)} historical messages.")
+            logging.info(f"Sweeper deleted final {len(messages_to_delete)} historical bot messages.")
             
         logging.info("History sweeper finished successfully.")
     except Exception as e:
@@ -212,9 +212,6 @@ def setup_commands(bot_client):
                 
             # If a human speaks
             if sender.id not in our_ids:
-                if delete_delay > 0:
-                    asyncio.create_task(delete_other_message(event.message, delete_delay))
-                
                 msg_text = event.raw_text.lower() if event.raw_text else ""
                 if not msg_text: return
                 
