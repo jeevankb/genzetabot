@@ -78,32 +78,34 @@ async def delete_message_later(client, chat_id, message_id, delay):
     except:
         pass
 
+async def delete_other_message(message, delay):
+    if delay <= 0: return
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+        logging.info(f"Deleted a group member's message after {delay} seconds.")
+    except Exception as e:
+        pass
+
 
 async def history_sweeper(client, chat_entity, delay_seconds):
     try:
-        logging.info(f"Starting background history sweeper for bot messages older than {delay_seconds}s...")
+        logging.info(f"Starting background history sweeper for all messages older than {delay_seconds}s...")
         cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=delay_seconds)
         
-        our_ids = []
-        for acc_data in clients.values():
-            try:
-                our_ids.append((await acc_data["client"].get_me()).id)
-            except: pass
-            
         messages_to_delete = []
         async for msg in client.iter_messages(chat_entity, offset_date=cutoff_date):
-            if msg.sender_id in our_ids:
-                messages_to_delete.append(msg.id)
+            messages_to_delete.append(msg.id)
                 
             if len(messages_to_delete) >= 100:
                 await client.delete_messages(chat_entity, messages_to_delete)
-                logging.info("Sweeper deleted 100 historical bot messages...")
+                logging.info("Sweeper deleted 100 historical messages...")
                 messages_to_delete.clear()
                 await asyncio.sleep(2.0)
                 
         if messages_to_delete:
             await client.delete_messages(chat_entity, messages_to_delete)
-            logging.info(f"Sweeper deleted final {len(messages_to_delete)} historical bot messages.")
+            logging.info(f"Sweeper deleted final {len(messages_to_delete)} historical messages.")
             
         logging.info("History sweeper finished successfully.")
     except Exception as e:
@@ -212,6 +214,9 @@ def setup_commands(bot_client):
                 
             # If a human speaks
             if sender.id not in our_ids:
+                if delete_delay > 0:
+                    asyncio.create_task(delete_other_message(event.message, delete_delay))
+                    
                 msg_text = event.raw_text.lower() if event.raw_text else ""
                 if not msg_text: return
                 
@@ -329,6 +334,27 @@ async def chat_loop():
                 
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
+                    
+                # Account 4 AI Participation (90%)
+                if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
+                    try:
+                        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
+                        response = await ai_model.generate_content_async(prompt)
+                        if response and response.text:
+                            ai_text = response.text.strip()
+                            acc4_client = clients["acc4"]["client"]
+                            await asyncio.sleep(random.uniform(2.0, 4.0))
+                            async with acc4_client.action(entity, 'typing'):
+                                await asyncio.sleep(1.5)
+                            ai_sent_msg = await acc4_client.send_message(entity, ai_text, reply_to=sent_msg.id)
+                            logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
+                            total_messages_sent += 1
+                            if delete_delay > 0:
+                                asyncio.create_task(delete_message_later(acc4_client, entity.id, ai_sent_msg.id, delete_delay))
+                    except Exception as e:
+                        logging.error(f"AI Account 4 error: {e}")
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
             except FloodWaitError as e:
