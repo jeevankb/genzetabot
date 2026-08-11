@@ -16,7 +16,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import ReactionEmoji, InputMediaPoll, Poll, PollAnswer, InputMediaDice
 
 # Try importing generative AI
 try:
@@ -350,6 +350,45 @@ async def trigger_anime_news_event(entity):
     except Exception as e:
         logging.error(f"Anime News Event Failed: {e}")
 
+async def trigger_poll_event(entity):
+    global total_messages_sent
+    if not HAS_GENAI or "acc4" not in clients: return
+    try:
+        logging.info("Triggering Anime Poll Event...")
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
+        response = await ai_model.generate_content_async(prompt)
+        text = response.text.strip() if response and response.text else "Who is the strongest Hashira? | Gyomei | Sanemi | Rengoku"
+        
+        parts = [p.strip() for p in text.split('|') if p.strip()]
+        if len(parts) < 3:
+            parts = ["Who is the strongest Hashira?", "Gyomei", "Sanemi", "Rengoku"]
+            
+        question = parts[0][:255]
+        answers = [PollAnswer(text=opt[:100], option=str(i).encode('utf-8')) for i, opt in enumerate(parts[1:11])]
+        
+        poll_media = InputMediaPoll(
+            poll=Poll(
+                id=random.getrandbits(62),
+                question=question,
+                answers=answers
+            )
+        )
+        
+        acc4 = clients["acc4"]["client"]
+        await simulate_typing(acc4, entity, question)
+        poll_msg = await acc4.send_message(entity, file=poll_media)
+        logging.info(f"[Account 4] POLL: {question}")
+        total_messages_sent += 1
+        
+        if delete_delay > 0:
+            asyncio.create_task(delete_message_later(acc4, entity.id, poll_msg.id, max(delete_delay, 120)))
+            
+    except Exception as e:
+        logging.error(f"Anime Poll Event Failed: {e}")
+
 async def chat_loop():
     global bot_active
     
@@ -381,6 +420,25 @@ async def chat_loop():
                 # 5% chance to trigger Anime News Event
                 if HAS_GENAI and random.random() < 0.05:
                     await trigger_anime_news_event(entity)
+                    
+                # 3% chance to trigger Anime Poll Event
+                if HAS_GENAI and random.random() < 0.03:
+                    await trigger_poll_event(entity)
+                    
+                # 2% chance to drop an animated emoji sticker
+                if random.random() < 0.02:
+                    emoji_sticker = random.choice(['🎲', '🎯', '🏀', '⚽', '🎳', '🎰', '❤️', '🔥', '😂', '👍'])
+                    if emoji_sticker in ['🎲', '🎯', '🏀', '⚽', '🎳', '🎰']:
+                        await simulate_typing(client, entity, "sticker")
+                        sent_sticker = await client.send_message(entity, file=InputMediaDice(emoticon=emoji_sticker))
+                    else:
+                        await simulate_typing(client, entity, emoji_sticker)
+                        sent_sticker = await client.send_message(entity, emoji_sticker)
+                    logging.info(f"[{name}] Sent Animated Sticker: {emoji_sticker}")
+                    total_messages_sent += 1
+                    if delete_delay > 0:
+                        asyncio.create_task(delete_message_later(client, entity.id, sent_sticker.id, delete_delay))
+                    await asyncio.sleep(message_speed)
                 
                 reply_msg_id = None
                 if reply_to_csv and reply_to_csv in message_tracker:
