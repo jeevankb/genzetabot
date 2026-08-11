@@ -30,6 +30,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Load environment variables
 load_dotenv()
+if HAS_GENAI:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Data loading
 CSV_FILE = "anime_group_chat_10000.csv"
@@ -116,9 +118,14 @@ async def history_sweeper(client, chat_entity, delay_seconds):
     except Exception as e:
         logging.error(f"Error in history sweeper: {e}")
 
+async def simulate_typing(client, entity, text):
+    typing_time = min(max(len(text) * 0.05, 1.0), 8.0)
+    async with client.action(entity, 'typing'):
+        await asyncio.sleep(typing_time)
+
 async def send_dynamic_reply(client, entity, target_msg, text):
     global total_messages_sent
-    await asyncio.sleep(random.uniform(3.0, 7.0))
+    await simulate_typing(client, entity, text)
     try:
         sent_msg = await client.send_message(entity, text, reply_to=target_msg)
         total_messages_sent += 1
@@ -306,8 +313,7 @@ async def trigger_anime_news_event(entity):
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
-        async with acc4.action(entity, 'typing'):
-            await asyncio.sleep(2.0)
+        await simulate_typing(acc4, entity, news_text)
         
         news_msg = await acc4.send_message(entity, news_text)
         logging.info(f"[Account 4] NEWS: {news_text}")
@@ -331,8 +337,7 @@ async def trigger_anime_news_event(entity):
             resp_reply = await ai_model.generate_content_async(prompt_reply)
             reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
             
-            async with acc["client"].action(entity, 'typing'):
-                await asyncio.sleep(random.uniform(2.0, 4.0))
+            await simulate_typing(acc["client"], entity, reply_text)
                 
             reply_msg = await acc["client"].send_message(entity, reply_text, reply_to=news_msg.id)
             logging.info(f"[{acc['name']}] REACTS: {reply_text}")
@@ -381,8 +386,7 @@ async def chat_loop():
                 if reply_to_csv and reply_to_csv in message_tracker:
                     reply_msg_id = message_tracker[reply_to_csv]
                 
-                async with client.action(entity, 'typing'):
-                    await asyncio.sleep(random.uniform(2.0, 5.0))
+                await simulate_typing(client, entity, msg_text)
                 
                 sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
                 logging.info(f"[{name}] Sent: {msg_text}")
@@ -392,6 +396,8 @@ async def chat_loop():
                 
                 if csv_id:
                     message_tracker[csv_id] = sent_msg.id
+                    if len(message_tracker) > 1000:
+                        message_tracker.pop(next(iter(message_tracker)))
                 
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
@@ -406,9 +412,7 @@ async def chat_loop():
                         if response and response.text:
                             ai_text = response.text.strip()
                             acc4_client = clients["acc4"]["client"]
-                            await asyncio.sleep(random.uniform(2.0, 4.0))
-                            async with acc4_client.action(entity, 'typing'):
-                                await asyncio.sleep(1.5)
+                            await simulate_typing(acc4_client, entity, ai_text)
                             ai_sent_msg = await acc4_client.send_message(entity, ai_text, reply_to=sent_msg.id)
                             logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
                             total_messages_sent += 1
@@ -421,8 +425,12 @@ async def chat_loop():
             except FloodWaitError as e:
                 logging.warning(f"Rate limited! Sleeping for {e.seconds}s")
                 await asyncio.sleep(e.seconds)
+            except ConnectionError as e:
+                logging.error(f"Connection dropped! Pausing for 5s to reconnect: {e}")
+                await asyncio.sleep(5)
             except Exception as e:
                 logging.error(f"Error sending message: {e}")
+                await asyncio.sleep(3)
                 
             await asyncio.sleep(message_speed)
         else:
