@@ -288,6 +288,58 @@ def setup_commands(bot_client):
                         except: pass
         except: pass
 
+async def trigger_anime_news_event(entity):
+    global total_messages_sent
+    if not HAS_GENAI or "acc4" not in clients: return
+    try:
+        logging.info("Triggering Anime News Event...")
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
+        resp_news = await ai_model.generate_content_async(prompt_news)
+        news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
+        
+        acc4 = clients["acc4"]["client"]
+        async with acc4.action(entity, 'typing'):
+            await asyncio.sleep(2.0)
+        
+        news_msg = await acc4.send_message(entity, news_text)
+        logging.info(f"[Account 4] NEWS: {news_text}")
+        total_messages_sent += 1
+        if delete_delay > 0:
+            asyncio.create_task(delete_message_later(acc4, entity.id, news_msg.id, delete_delay))
+            
+        await asyncio.sleep(message_speed)
+        
+        active_accs = [c for k, c in clients.items() if k != "acc4"]
+        random.shuffle(active_accs)
+        
+        for acc in active_accs:
+            if random.random() < 0.7:
+                try:
+                    emoji = random.choice(["🔥", "😱", "👀", "💯", "❤️"])
+                    await acc["client"](SendReactionRequest(peer=entity, msg_id=news_msg.id, reaction=[ReactionEmoji(emoticon=emoji)]))
+                except: pass
+                
+            prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (e.g. wow, no way, hype). No hashtags."
+            resp_reply = await ai_model.generate_content_async(prompt_reply)
+            reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
+            
+            async with acc["client"].action(entity, 'typing'):
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+                
+            reply_msg = await acc["client"].send_message(entity, reply_text, reply_to=news_msg.id)
+            logging.info(f"[{acc['name']}] REACTS: {reply_text}")
+            total_messages_sent += 1
+            if delete_delay > 0:
+                asyncio.create_task(delete_message_later(acc["client"], entity.id, reply_msg.id, delete_delay))
+                
+            await asyncio.sleep(message_speed)
+            
+    except Exception as e:
+        logging.error(f"Anime News Event Failed: {e}")
+
 async def chat_loop():
     global bot_active
     
@@ -315,6 +367,10 @@ async def chat_loop():
             
             try:
                 entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                
+                # 5% chance to trigger Anime News Event
+                if HAS_GENAI and random.random() < 0.05:
+                    await trigger_anime_news_event(entity)
                 
                 reply_msg_id = None
                 if reply_to_csv and reply_to_csv in message_tracker:
