@@ -390,7 +390,7 @@ async def trigger_poll_event(entity):
         logging.error(f"Anime Poll Event Failed: {e}")
 
 async def chat_loop():
-    global bot_active
+    global bot_active, total_messages_sent
     
     csv_index = 0
     active_keys = [k for k in clients.keys() if k != "acc4"]
@@ -449,7 +449,6 @@ async def chat_loop():
                 sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
                 logging.info(f"[{name}] Sent: {msg_text}")
                 
-                global total_messages_sent
                 total_messages_sent += 1
                 
                 if csv_id:
