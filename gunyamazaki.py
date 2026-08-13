@@ -264,7 +264,7 @@ def setup_commands(bot_client):
                     try:
                         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
                         prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
                         response = await ai_model.generate_content_async(prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
@@ -291,7 +291,7 @@ def setup_commands(bot_client):
                     if "?" in msg_text or random.random() < 0.3:
                         try:
                             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                            ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                            ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
                             prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
                             response = await ai_model.generate_content_async(prompt)
                             if response and response.text:
@@ -306,7 +306,7 @@ async def trigger_anime_news_event(entity):
     try:
         logging.info("Triggering Anime News Event...")
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+        ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
         
         prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
         resp_news = await ai_model.generate_content_async(prompt_news)
@@ -356,7 +356,7 @@ async def trigger_poll_event(entity):
     try:
         logging.info("Triggering Anime Poll Event...")
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+        ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
         
         prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
         response = await ai_model.generate_content_async(prompt)
@@ -463,7 +463,7 @@ async def chat_loop():
                 if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
                     try:
                         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                        ai_model = genai.GenerativeModel("gemini-1.5-flash")
+                        ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
                         prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
                         response = await ai_model.generate_content_async(prompt)
                         if response and response.text:
