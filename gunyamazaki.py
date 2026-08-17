@@ -26,6 +26,8 @@ except ImportError:
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger("google").setLevel(logging.ERROR)
+logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 # Load environment variables
 load_dotenv()
@@ -270,7 +272,7 @@ def setup_commands(bot_client):
                         
                 if is_reply_to_bot and HAS_GENAI:
                     try:
-                        prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
+                        prompt = f"You are chatting in a group. A user replied to your message: '{event.raw_text}'. Reply casually in exactly 1 short sentence. Just write the message text, no names, no hashtags, no quotes."
                         response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
@@ -296,7 +298,7 @@ def setup_commands(bot_client):
                 if not responded and HAS_GENAI:
                     if "?" in msg_text or random.random() < 0.3:
                         try:
-                            prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
+                            prompt = f"You are a casual anime fan in a Telegram group. Reply to this message: '{msg_text}'. Write exactly 1 short, casual sentence. Just output the raw message text, no names, no hashtags."
                             response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                             if response and response.text:
                                 reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
@@ -310,7 +312,7 @@ async def trigger_anime_news_event(entity):
     try:
         logging.info("Triggering Anime News Event...")
         
-        prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
+        prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of real anime news. Keep it to exactly 1 short sentence, casual, human-like. Do not use hashtags, quotes, or your name."
         resp_news = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt_news)
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
@@ -335,7 +337,7 @@ async def trigger_anime_news_event(entity):
                     await acc["client"](SendReactionRequest(peer=entity, msg_id=news_msg.id, reaction=[ReactionEmoji(emoticon=emoji)]))
                 except: pass
                 
-            prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (e.g. wow, no way, hype). No hashtags."
+            prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (like wow, hype, or no way). Just output the raw text, no names or hashtags."
             resp_reply = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt_reply)
             reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
             
@@ -358,7 +360,7 @@ async def trigger_poll_event(entity):
     try:
         logging.info("Triggering Anime Poll Event...")
         
-        prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
+        prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this and nothing else: Question | Option 1 | Option 2 | Option 3"
         response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
         text = response.text.strip() if response and response.text else "Who is the strongest Hashira? | Gyomei | Sanemi | Rengoku"
         
@@ -444,19 +446,20 @@ async def chat_loop():
                         
                     persona = personas.get(chosen_key, "You are a casual anime fan.")
                     
-                    prompt = f"""You are {name} in a Telegram group chat.
+                    prompt = f"""You are an anime fan in a Telegram group chat.
 Your persona: {persona}
 Current topic of discussion: {current_topic}
 
 Recent Chat History:
 {history_str}
 
-Respond naturally to the ongoing conversation. If the conversation just started, initiate it based on the current topic.
 CRITICAL RULES:
-- Keep your response to 1 short, casual sentence (max 15 words).
-- Talk like a normal human (use lowercase mostly, abbreviations like lol, rn).
-- NEVER prefix your response with your name (e.g., do not say "{name}: hello").
-- Do not use hashtags."""
+- Read the chat history and reply directly to the ongoing conversation.
+- Write EXACTLY 1 short, casual sentence (max 15 words).
+- Talk like a normal human (use lowercase mostly, slang like lol, rn).
+- DO NOT prefix your response with your name.
+- DO NOT use hashtags, quotes, or weird formatting.
+- Just output the raw message text."""
 
                     response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                     if response and response.text:
