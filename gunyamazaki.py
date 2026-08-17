@@ -271,7 +271,7 @@ def setup_commands(bot_client):
                 if is_reply_to_bot and HAS_GENAI:
                     try:
                         prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                        response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
                             return
@@ -297,7 +297,7 @@ def setup_commands(bot_client):
                     if "?" in msg_text or random.random() < 0.3:
                         try:
                             prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
-                            response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                            response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                             if response and response.text:
                                 reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
                                 asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, response.text.strip()))
@@ -311,7 +311,7 @@ async def trigger_anime_news_event(entity):
         logging.info("Triggering Anime News Event...")
         
         prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
-        resp_news = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt_news)
+        resp_news = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt_news)
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
@@ -336,7 +336,7 @@ async def trigger_anime_news_event(entity):
                 except: pass
                 
             prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (e.g. wow, no way, hype). No hashtags."
-            resp_reply = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt_reply)
+            resp_reply = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt_reply)
             reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
             
             await simulate_typing(acc["client"], entity, reply_text)
@@ -359,7 +359,7 @@ async def trigger_poll_event(entity):
         logging.info("Triggering Anime Poll Event...")
         
         prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
-        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
         text = response.text.strip() if response and response.text else "Who is the strongest Hashira? | Gyomei | Sanemi | Rengoku"
         
         parts = [p.strip() for p in text.split('|') if p.strip()]
@@ -458,7 +458,7 @@ CRITICAL RULES:
 - NEVER prefix your response with your name (e.g., do not say "{name}: hello").
 - Do not use hashtags."""
 
-                    response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                    response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
                     if response and response.text:
                         msg_text = response.text.strip()
                         
