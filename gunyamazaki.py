@@ -264,7 +264,7 @@ def setup_commands(bot_client):
                     try:
                         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
                         prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                            ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
+                        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
                         response = await ai_model.generate_content_async(prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
@@ -291,7 +291,7 @@ def setup_commands(bot_client):
                     if "?" in msg_text or random.random() < 0.3:
                         try:
                             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                                ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
+                            ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
                             prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
                             response = await ai_model.generate_content_async(prompt)
                             if response and response.text:
@@ -463,7 +463,7 @@ async def chat_loop():
                 if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
                     try:
                         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                            ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
+                        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
                         prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
                         response = await ai_model.generate_content_async(prompt)
                         if response and response.text:
