@@ -76,8 +76,29 @@ async def translator_handler(event):
             await event.reply(msg)
             logging.info(f"Replied in group with translation.")
 
+from aiohttp import web
+
+async def dummy_server():
+    try:
+        async def hello(request):
+            return web.Response(text="Auto-Translator is running live on Render!")
+        app = web.Application()
+        app.add_routes([web.get('/', hello)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = int(os.environ.get("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logging.info(f"Render health-check server started on port {port}")
+    except Exception as e:
+        logging.error(f"Failed to start web server: {e}")
+
 async def main():
     logging.info("Starting Auto-Translator Userbot...")
+    
+    # Start web server for Render health checks
+    await dummy_server()
+    
     await client.start()
     logging.info("Translator is running! Listening to target chat...")
     await client.run_until_disconnected()
