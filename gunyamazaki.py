@@ -308,9 +308,10 @@ async def trigger_anime_news_event(entity):
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
-        await simulate_typing(acc4, entity, news_text)
+        acc4_entity = await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        await simulate_typing(acc4, acc4_entity, news_text)
         
-        news_msg = await acc4.send_message(entity, news_text)
+        news_msg = await acc4.send_message(acc4_entity, news_text)
         logging.info(f"[Account 4] NEWS: {news_text}")
         total_messages_sent += 1
         if delete_delay > 0:
@@ -332,9 +333,10 @@ async def trigger_anime_news_event(entity):
             resp_reply = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt_reply)
             reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
             
-            await simulate_typing(acc["client"], entity, reply_text)
+            acc_entity = await acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            await simulate_typing(acc["client"], acc_entity, reply_text)
                 
-            reply_msg = await acc["client"].send_message(entity, reply_text, reply_to=news_msg.id)
+            reply_msg = await acc["client"].send_message(acc_entity, reply_text, reply_to=news_msg.id)
             logging.info(f"[{acc['name']}] REACTS: {reply_text}")
             total_messages_sent += 1
             if delete_delay > 0:
@@ -370,8 +372,9 @@ async def trigger_poll_event(entity):
         )
         
         acc4 = clients["acc4"]["client"]
-        await simulate_typing(acc4, entity, question)
-        poll_msg = await acc4.send_message(entity, file=poll_media)
+        acc4_entity = await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        await simulate_typing(acc4, acc4_entity, question)
+        poll_msg = await acc4.send_message(acc4_entity, file=poll_media)
         logging.info(f"[Account 4] POLL: {question}")
         total_messages_sent += 1
         
@@ -459,8 +462,9 @@ async def chat_loop():
                         if response and response.text:
                             ai_text = response.text.strip()
                             acc4_client = clients["acc4"]["client"]
-                            await simulate_typing(acc4_client, entity, ai_text)
-                            ai_sent_msg = await acc4_client.send_message(entity, ai_text, reply_to=sent_msg.id)
+                            acc4_entity = await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                            await simulate_typing(acc4_client, acc4_entity, ai_text)
+                            ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=sent_msg.id)
                             logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
                             total_messages_sent += 1
                             if delete_delay > 0:
