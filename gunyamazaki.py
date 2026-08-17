@@ -520,16 +520,26 @@ async def main():
         api_id = cfg["api_id"]
         api_hash = cfg["api_hash"]
         
-        if session_str:
-            client = TelegramClient(StringSession(session_str), api_id, api_hash)
-            await client.start()
+        try:
+            if session_str:
+                client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                await client.start()
+                clients[key] = {"client": client, "name": cfg["name"]}
+                logging.info(f"Connected {cfg['name']} via Session String.")
+            elif bot_token and key == "acc4":
+                client = TelegramClient(StringSession(), api_id, api_hash)
+                await client.start(bot_token=bot_token)
+                clients[key] = {"client": client, "name": cfg["name"]}
+                logging.info(f"Connected {cfg['name']} via Bot Token.")
+        except FloodWaitError as e:
+            logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds} seconds before logging in. Sleeping...")
+            await asyncio.sleep(e.seconds + 2)
+            if session_str:
+                await client.start()
+            elif bot_token and key == "acc4":
+                await client.start(bot_token=bot_token)
             clients[key] = {"client": client, "name": cfg["name"]}
-            logging.info(f"Connected {cfg['name']} via Session String.")
-        elif bot_token and key == "acc4":
-            client = TelegramClient(StringSession(), api_id, api_hash)
-            await client.start(bot_token=bot_token)
-            clients[key] = {"client": client, "name": cfg["name"]}
-            logging.info(f"Connected {cfg['name']} via Bot Token.")
+            logging.info(f"Connected {cfg['name']} after waiting.")
             
     global TARGET_CHAT_ID
     if "acc1" in clients:
