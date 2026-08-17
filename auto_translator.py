@@ -39,9 +39,13 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 async def translate_text(text, target_language):
     """Uses Gemini to translate text accurately."""
     try:
-        prompt = f"Translate the following text to {target_language}. Respond ONLY with the translated text, nothing else. Text: '{text}'"
+        # We tell Gemini to ignore English and Hindi so it doesn't spam translations for messages you already understand!
+        prompt = f"If the following text is mostly in English or Hindi, output exactly 'NO_TRANSLATION'. Otherwise, translate the text to {target_language}. Respond ONLY with the translated text (or 'NO_TRANSLATION'), nothing else. Text: '{text}'"
         response = await gemini_client.aio.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-        return response.text.strip()
+        result = response.text.strip()
+        if "NO_TRANSLATION" in result:
+            return None
+        return result
     except Exception as e:
         logging.error(f"Translation failed: {e}")
         return None
@@ -60,22 +64,17 @@ async def translator_handler(event):
                 logging.info(f"Translated Outgoing: {original_text} -> {translated}")
         return
 
-    # 2. INCOMING MESSAGES (Persian guy typing -> Forwards English to your Saved Messages)
+    # 2. INCOMING MESSAGES (Persian guy typing -> Bot replies in the group with English)
     if not event.out and event.raw_text:
-        # We only want to translate if it contains Arabic/Persian characters
-        # Or you can just translate everything that isn't English.
         
-        # Tell Gemini to translate it to English/Hindi
+        # Tell Gemini to translate it to English
         translated = await translate_text(event.raw_text, "English")
         
-        if translated and translated.lower() not in event.raw_text.lower():
-            sender = await event.get_sender()
-            sender_name = sender.first_name if sender else "Unknown"
-            
-            # Send the translation to your own "Saved Messages" so only YOU can see it
-            msg = f"**Translation from {sender_name} in Target Group:**\n\nOriginal: {event.raw_text}\n\nEnglish: {translated}"
-            await client.send_message('me', msg)
-            logging.info(f"Forwarded incoming translation to Saved Messages.")
+        if translated:
+            # Send the translation directly into the group as a reply to the foreign message!
+            msg = f"**[Auto-Translation]**\n{translated}"
+            await event.reply(msg)
+            logging.info(f"Replied in group with translation.")
 
 async def main():
     logging.info("Starting Auto-Translator Userbot...")
