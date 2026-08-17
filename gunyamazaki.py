@@ -5,7 +5,6 @@ try:
 except ImportError:
     pass
 import os
-import csv
 import random
 import logging
 import re
@@ -33,11 +32,9 @@ load_dotenv()
 if HAS_GENAI:
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Data loading
-CSV_FILE = "anime_group_chat_10000.csv"
+# Data loading removed! We are 100% AI powered now.
 TARGET_CHAT = "https://t.me/+1tWK4j-BYC85MDVl"
 TARGET_CHAT_ID = None
-conversation_data = []
 
 # Account Configuration
 accounts = {
@@ -47,18 +44,25 @@ accounts = {
     "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
-def load_csv():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, CSV_FILE)
-    
-    if os.path.exists(csv_path):
-        with open(csv_path, mode="r", encoding="utf-8-sig") as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                conversation_data.append(row)
-        logging.info(f"Loaded {len(conversation_data)} messages from {CSV_FILE}.")
-    else:
-        logging.error(f"{CSV_FILE} not found in the directory.")
+personas = {
+    "acc1": "You are a hardcore manga and light novel reader. You believe the source material is always superior and you focus heavily on plot and world-building.",
+    "acc2": "You are a casual anime watcher. You love mainstream shounen (like Demon Slayer, JJK, DBZ) and you hype up amazing animation and fights.",
+    "acc3": "You are a witty troll/joker. You playfully stir up controversial anime opinions and use a lot of modern slang.",
+    "acc4": "You are an analytical otaku. You love discussing animation studios (MAPPA, Ufotable), directors, and deep lore/power scaling."
+}
+
+topics_list = [
+    "Most overrated anime of all time",
+    "Which anime has the best fight choreography?",
+    "Manga vs Anime: which is actually better?",
+    "If you could have one anime power, what would it be?",
+    "Saddest anime moments",
+    "Best villains in anime history",
+    "Which upcoming anime are you most hyped for?",
+    "Is One Piece too long to start now?",
+    "Best anime openings and endings",
+    "Romance anime recommendations"
+]
 
 # Global state
 bot_active = False
@@ -66,6 +70,11 @@ message_speed = 15
 delete_delay = 360  # Default 6 minutes
 total_messages_sent = 0
 clients = {}
+
+# Chat Memory
+chat_history = []
+current_topic = random.choice(topics_list)
+topic_counter = 0
 
 def parse_time_to_seconds(time_str):
     time_str = time_str.lower().strip()
@@ -142,18 +151,17 @@ def setup_commands(bot_client):
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
-                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {delete_delay}s\nMessages Sent: {total_messages_sent}")
+                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {delete_delay}s\nMessages Sent: {total_messages_sent}\nCurrent Topic: {current_topic}")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         global bot_active
-        # Only allow Account 1 to use this command
         try:
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 bot_active = True
-                await event.reply("✅ GunYamazaki System Locked On. Starting conversation loop...")
+                await event.reply("✅ GunYamazaki System Locked On. Starting dynamic AI conversation loop...")
                 logging.info("System LOCKED ON by admin.")
         except: pass
 
@@ -198,7 +206,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(chats=TARGET_CHAT_ID or TARGET_CHAT))
     async def auto_delete_handler(event):
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/setspeed")):
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/setspeed", "/stats")):
             return
             
         try:
@@ -390,29 +398,24 @@ async def trigger_poll_event(entity):
         logging.error(f"Anime Poll Event Failed: {e}")
 
 async def chat_loop():
-    global bot_active, total_messages_sent
+    global bot_active, total_messages_sent, current_topic, topic_counter, chat_history
     
-    csv_index = 0
-    active_keys = [k for k in clients.keys() if k != "acc4"]
-    message_tracker = {}
+    # All connected accounts will participate
+    active_keys = list(clients.keys())
+    last_message_id = None
     
     while True:
-        if bot_active and conversation_data and active_keys:
-            msg_data = conversation_data[csv_index]
-            
-            sender_str = msg_data.get("sender", "").strip()
-            # If the CSV specifies a sender that we have connected, use them. Otherwise, pick random.
-            if sender_str in active_keys:
-                chosen_key = sender_str
-            else:
-                chosen_key = random.choice(active_keys)
-                
+        if bot_active and active_keys:
+            # Change topic randomly
+            topic_counter += 1
+            if topic_counter > 30:
+                current_topic = random.choice(topics_list)
+                topic_counter = 0
+                logging.info(f"Topic changed to: {current_topic}")
+
+            chosen_key = random.choice(active_keys)
             client = clients[chosen_key]["client"]
             name = clients[chosen_key]["name"]
-            
-            msg_text = msg_data.get("message", "...")
-            csv_id = msg_data.get("id", "").strip()
-            reply_to_csv = msg_data.get("reply_to", "").strip()
             
             try:
                 entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
@@ -440,45 +443,56 @@ async def chat_loop():
                         asyncio.create_task(delete_message_later(client, entity.id, sent_sticker.id, delete_delay))
                     await asyncio.sleep(message_speed)
                 
-                reply_msg_id = None
-                if reply_to_csv and reply_to_csv in message_tracker:
-                    reply_msg_id = message_tracker[reply_to_csv]
-                
+                # Dynamic AI Message Generation
+                msg_text = "I need my AI brain to talk!"
+                if HAS_GENAI:
+                    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+                    ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
+                    
+                    history_str = "\\n".join([f"{msg['name']}: {msg['text']}" for msg in chat_history])
+                    if not history_str:
+                        history_str = "(Chat just started)"
+                        
+                    persona = personas.get(chosen_key, "You are a casual anime fan.")
+                    
+                    prompt = f"""You are {name} in a Telegram group chat.
+Your persona: {persona}
+Current topic of discussion: {current_topic}
+
+Recent Chat History:
+{history_str}
+
+Respond naturally to the ongoing conversation. If the conversation just started, initiate it based on the current topic.
+CRITICAL RULES:
+- Keep your response to 1 short, casual sentence (max 15 words).
+- Talk like a normal human (use lowercase mostly, abbreviations like lol, rn).
+- NEVER prefix your response with your name (e.g., do not say "{name}: hello").
+- Do not use hashtags."""
+
+                    response = await ai_model.generate_content_async(prompt)
+                    if response and response.text:
+                        msg_text = response.text.strip()
+                        
+                chat_history.append({"name": name, "text": msg_text})
+                if len(chat_history) > 10:
+                    chat_history.pop(0)
+
                 await simulate_typing(client, entity, msg_text)
                 
-                sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
-                logging.info(f"[{name}] Sent: {msg_text}")
+                # 30% chance to reply to the previous message
+                reply_to_id = None
+                if random.random() < 0.3 and last_message_id:
+                    reply_to_id = last_message_id
+                    
+                sent_msg = await client.send_message(entity, msg_text, reply_to=reply_to_id)
+                last_message_id = sent_msg.id
+                logging.info(f"[{name}] Sent AI Message: {msg_text}")
                 
                 total_messages_sent += 1
-                
-                if csv_id:
-                    message_tracker[csv_id] = sent_msg.id
-                    if len(message_tracker) > 1000:
-                        message_tracker.pop(next(iter(message_tracker)))
                 
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
                     
-                # Account 4 AI Participation (90%)
-                if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
-                    try:
-                        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                        ai_model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
-                        prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
-                        response = await ai_model.generate_content_async(prompt)
-                        if response and response.text:
-                            ai_text = response.text.strip()
-                            acc4_client = clients["acc4"]["client"]
-                            await simulate_typing(acc4_client, entity, ai_text)
-                            ai_sent_msg = await acc4_client.send_message(entity, ai_text, reply_to=sent_msg.id)
-                            logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
-                            total_messages_sent += 1
-                            if delete_delay > 0:
-                                asyncio.create_task(delete_message_later(acc4_client, entity.id, ai_sent_msg.id, delete_delay))
-                    except Exception as e:
-                        logging.error(f"AI Account 4 error: {e}")
-                
-                csv_index = (csv_index + 1) % len(conversation_data)
             except FloodWaitError as e:
                 logging.warning(f"Rate limited! Sleeping for {e.seconds}s")
                 await asyncio.sleep(e.seconds)
@@ -509,8 +523,6 @@ async def dummy_server():
         logging.error(f"Failed to start web server: {e}")
 
 async def main():
-    load_csv()
-    
     # Start web server for Render
     await dummy_server()
     
