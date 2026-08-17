@@ -20,18 +20,20 @@ from telethon.tl.types import ReactionEmoji, InputMediaPoll, Poll, PollAnswer, I
 
 # Try importing generative AI
 try:
-    import google.generativeai as genai
+    from google import genai
     HAS_GENAI = True
+    gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 except ImportError:
     HAS_GENAI = False
+    gemini_client = None
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load environment variables
 load_dotenv()
-if HAS_GENAI:
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+if HAS_GENAI and not gemini_client:
+    gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Data loading
 CSV_FILE = "anime_group_chat_10000.csv"
@@ -262,10 +264,8 @@ def setup_commands(bot_client):
                         
                 if is_reply_to_bot and HAS_GENAI:
                     try:
-                        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
                         prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
-                        response = await ai_model.generate_content_async(prompt)
+                        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
                         if response and response.text:
                             asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
                             return
@@ -290,10 +290,8 @@ def setup_commands(bot_client):
                 if not responded and HAS_GENAI:
                     if "?" in msg_text or random.random() < 0.3:
                         try:
-                            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                            ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
                             prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
-                            response = await ai_model.generate_content_async(prompt)
+                            response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
                             if response and response.text:
                                 reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
                                 asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, response.text.strip()))
@@ -305,11 +303,8 @@ async def trigger_anime_news_event(entity):
     if not HAS_GENAI or "acc4" not in clients: return
     try:
         logging.info("Triggering Anime News Event...")
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
-        
         prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
-        resp_news = await ai_model.generate_content_async(prompt_news)
+        resp_news = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt_news)
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
@@ -334,7 +329,7 @@ async def trigger_anime_news_event(entity):
                 except: pass
                 
             prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (e.g. wow, no way, hype). No hashtags."
-            resp_reply = await ai_model.generate_content_async(prompt_reply)
+            resp_reply = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt_reply)
             reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
             
             await simulate_typing(acc["client"], entity, reply_text)
@@ -355,11 +350,8 @@ async def trigger_poll_event(entity):
     if not HAS_GENAI or "acc4" not in clients: return
     try:
         logging.info("Triggering Anime Poll Event...")
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
-        
         prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
-        response = await ai_model.generate_content_async(prompt)
+        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
         text = response.text.strip() if response and response.text else "Who is the strongest Hashira? | Gyomei | Sanemi | Rengoku"
         
         parts = [p.strip() for p in text.split('|') if p.strip()]
@@ -462,10 +454,8 @@ async def chat_loop():
                 # Account 4 AI Participation (90%)
                 if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
                     try:
-                        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                        ai_model = genai.GenerativeModel("models/gemini-flash-lite-latest")
                         prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
-                        response = await ai_model.generate_content_async(prompt)
+                        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
                         if response and response.text:
                             ai_text = response.text.strip()
                             acc4_client = clients["acc4"]["client"]
