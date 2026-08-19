@@ -89,6 +89,10 @@ async def delete_message_later(client, chat_id, message_id, delay):
 
 async def delete_other_message(message, delay):
     if delay <= 0: return
+    # Protect images and videos from being auto-deleted
+    if message.photo or message.video:
+        return
+        
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -104,6 +108,10 @@ async def history_sweeper(client, chat_entity, delay_seconds):
         
         messages_to_delete = []
         async for msg in client.iter_messages(chat_entity, offset_date=cutoff_date):
+            # Protect images and videos from being swept
+            if msg.photo or msg.video:
+                continue
+                
             messages_to_delete.append(msg.id)
                 
             if len(messages_to_delete) >= 100:
