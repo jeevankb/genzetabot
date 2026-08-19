@@ -12,7 +12,7 @@ import re
 import datetime
 from aiohttp import web
 from dotenv import load_dotenv
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import SendReactionRequest
@@ -294,8 +294,10 @@ def setup_commands(bot_client):
                             prompt = f"You are Gun, a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
                             response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
                             if response and response.text:
-                                reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
-                                asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, response.text.strip()))
+                                if "acc4" in clients:
+                                    reply_acc = clients["acc4"]
+                                    acc4_entity = await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                                    asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip()))
                         except: pass
         except: pass
 
@@ -540,7 +542,7 @@ async def main():
     if "acc1" in clients:
         try:
             entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
-            TARGET_CHAT_ID = entity.id
+            TARGET_CHAT_ID = utils.get_peer_id(entity)
             logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
         except Exception as e:
             logging.error(f"Failed to resolve TARGET_CHAT: {e}")
