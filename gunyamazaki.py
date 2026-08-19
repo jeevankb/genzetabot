@@ -549,6 +549,9 @@ async def main():
             TARGET_CHAT_ID = TARGET_CHAT
 
     if "acc4" in clients:
+        # Warm up the bot's entity cache since it uses an in-memory session
+        logging.info("Fetching dialogs for Account 4 to cache entities...")
+        await clients["acc4"]["client"].get_dialogs()
         setup_commands(clients["acc4"]["client"])
         
     logging.info("All accounts connected! Waiting for /lockon command...")
