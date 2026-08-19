@@ -37,7 +37,7 @@ if HAS_GENAI and not gemini_client:
 
 # Data loading
 CSV_FILE = "anime_group_chat_10000.csv"
-TARGET_CHAT = "https://t.me/+E8L2Lf1haXthZDM1"
+TARGET_CHAT = "https://t.me/+1tWK4j-BYC85MDVl"
 TARGET_CHAT_ID = None
 conversation_data = []
 
