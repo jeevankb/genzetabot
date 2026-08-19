@@ -288,9 +288,10 @@ def setup_commands(bot_client):
                         break
                         
                 if not responded and HAS_GENAI:
-                    if "?" in msg_text or random.random() < 0.3:
+                    # WAKE WORD: Only respond if the human mentions "gun"
+                    if re.search(r'\bgun\b', msg_text):
                         try:
-                            prompt = f"You are a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
+                            prompt = f"You are Gun, a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
                             response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
                             if response and response.text:
                                 reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
