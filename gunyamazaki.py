@@ -157,7 +157,8 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
-        global bot_active
+        global bot_active, BOT_ENTITY
+        BOT_ENTITY = event.input_chat
         # Only allow Account 1 to use this command
         try:
             sender = await event.get_sender()
@@ -201,13 +202,16 @@ def setup_commands(bot_client):
                     delete_delay = del_val
                     await event.reply(f"🗑 Auto-delete set to {delete_delay} seconds. Starting sweep...")
                     try:
-                        entity = await bot_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                        asyncio.create_task(history_sweeper(bot_client, entity, delete_delay))
+                        acc1_client = clients["acc1"]["client"]
+                        entity = await acc1_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                        asyncio.create_task(history_sweeper(acc1_client, entity, delete_delay))
                     except: pass
         except: pass
 
     @bot_client.on(events.NewMessage(chats=TARGET_CHAT_ID or TARGET_CHAT))
     async def auto_delete_handler(event):
+        global BOT_ENTITY
+        BOT_ENTITY = event.input_chat
         if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/setspeed")):
             return
             
@@ -304,7 +308,7 @@ def setup_commands(bot_client):
                             if response and response.text:
                                 if "acc4" in clients:
                                     reply_acc = clients["acc4"]
-                                    acc4_entity = TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                                    acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                                     asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip()))
                         except: pass
         except: pass
@@ -319,7 +323,7 @@ async def trigger_anime_news_event(entity):
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
-        acc4_entity = TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
         await simulate_typing(acc4, acc4_entity, news_text)
         
         news_msg = await acc4.send_message(acc4_entity, news_text)
@@ -383,7 +387,7 @@ async def trigger_poll_event(entity):
         )
         
         acc4 = clients["acc4"]["client"]
-        acc4_entity = TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
         await simulate_typing(acc4, acc4_entity, question)
         poll_msg = await acc4.send_message(acc4_entity, file=poll_media)
         logging.info(f"[Account 4] POLL: {question}")
@@ -473,7 +477,7 @@ async def chat_loop():
                         if response and response.text:
                             ai_text = response.text.strip()
                             acc4_client = clients["acc4"]["client"]
-                            acc4_entity = TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                            acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                             await simulate_typing(acc4_client, acc4_entity, ai_text)
                             ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=sent_msg.id)
                             logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
@@ -546,7 +550,8 @@ async def main():
             clients[key] = {"client": client, "name": cfg["name"]}
             logging.info(f"Connected {cfg['name']} after waiting.")
             
-    global TARGET_CHAT_ID, TARGET_INPUT_PEER
+    global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY
+    BOT_ENTITY = None
     TARGET_INPUT_PEER = None
     if "acc1" in clients:
         try:
