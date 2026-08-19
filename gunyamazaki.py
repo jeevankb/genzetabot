@@ -296,7 +296,7 @@ def setup_commands(bot_client):
                             if response and response.text:
                                 if "acc4" in clients:
                                     reply_acc = clients["acc4"]
-                                    acc4_entity = await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                                    acc4_entity = TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                                     asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip()))
                         except: pass
         except: pass
@@ -311,7 +311,7 @@ async def trigger_anime_news_event(entity):
         news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
         
         acc4 = clients["acc4"]["client"]
-        acc4_entity = await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
         await simulate_typing(acc4, acc4_entity, news_text)
         
         news_msg = await acc4.send_message(acc4_entity, news_text)
@@ -375,7 +375,7 @@ async def trigger_poll_event(entity):
         )
         
         acc4 = clients["acc4"]["client"]
-        acc4_entity = await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
         await simulate_typing(acc4, acc4_entity, question)
         poll_msg = await acc4.send_message(acc4_entity, file=poll_media)
         logging.info(f"[Account 4] POLL: {question}")
@@ -465,7 +465,7 @@ async def chat_loop():
                         if response and response.text:
                             ai_text = response.text.strip()
                             acc4_client = clients["acc4"]["client"]
-                            acc4_entity = await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                            acc4_entity = TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                             await simulate_typing(acc4_client, acc4_entity, ai_text)
                             ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=sent_msg.id)
                             logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
@@ -538,20 +538,21 @@ async def main():
             clients[key] = {"client": client, "name": cfg["name"]}
             logging.info(f"Connected {cfg['name']} after waiting.")
             
-    global TARGET_CHAT_ID
+    global TARGET_CHAT_ID, TARGET_INPUT_PEER
+    TARGET_INPUT_PEER = None
     if "acc1" in clients:
         try:
             entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
             TARGET_CHAT_ID = utils.get_peer_id(entity)
+            if hasattr(entity, 'access_hash'):
+                from telethon.tl.types import InputPeerChannel
+                TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
             logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
         except Exception as e:
             logging.error(f"Failed to resolve TARGET_CHAT: {e}")
             TARGET_CHAT_ID = TARGET_CHAT
 
     if "acc4" in clients:
-        # Warm up the bot's entity cache since it uses an in-memory session
-        logging.info("Fetching dialogs for Account 4 to cache entities...")
-        await clients["acc4"]["client"].get_dialogs()
         setup_commands(clients["acc4"]["client"])
         
     logging.info("All accounts connected! Waiting for /lockon command...")
