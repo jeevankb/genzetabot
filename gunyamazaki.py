@@ -457,8 +457,8 @@ async def chat_loop():
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
                     
-                # Account 4 AI Participation (90%)
-                if HAS_GENAI and random.random() < 0.90 and "acc4" in clients:
+                # Account 4 AI Participation (5%)
+                if HAS_GENAI and random.random() < 0.05 and "acc4" in clients:
                     try:
                         prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
                         response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
