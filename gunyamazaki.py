@@ -65,9 +65,40 @@ def load_csv():
 # Global state
 bot_active = False
 message_speed = 15
-delete_delay = 360  # Default 6 minutes
+delete_delay = 900  # Default 15 minutes
 total_messages_sent = 0
 clients = {}
+STATE_MSG_ID = None
+
+
+
+async def load_state_from_telegram():
+    global STATE_MSG_ID
+    try:
+        acc1 = clients["acc1"]["client"]
+        async for msg in acc1.iter_messages("me", search="[GunYamazaki State]"):
+            if "[GunYamazaki State]" in msg.text:
+                STATE_MSG_ID = msg.id
+                try:
+                    return int(msg.text.split("csv_index=")[1])
+                except: pass
+                break
+    except Exception as e:
+        logging.error(f"Failed to load state from telegram: {e}")
+    return 0
+
+async def save_state_to_telegram(csv_idx):
+    global STATE_MSG_ID
+    try:
+        acc1 = clients["acc1"]["client"]
+        text = f"[GunYamazaki State] csv_index={csv_idx}"
+        if STATE_MSG_ID:
+            await acc1.edit_message("me", STATE_MSG_ID, text)
+        else:
+            msg = await acc1.send_message("me", text)
+            STATE_MSG_ID = msg.id
+    except Exception as e:
+        logging.error(f"Failed to save state to telegram: {e}")
 
 def parse_time_to_seconds(time_str):
     time_str = time_str.lower().strip()
@@ -402,7 +433,8 @@ async def trigger_poll_event(entity):
 async def chat_loop():
     global bot_active, total_messages_sent
     
-    csv_index = 0
+    csv_index = await load_state_from_telegram()
+    logging.info(f"Resuming conversation from CSV index {csv_index}")
     active_keys = [k for k in clients.keys() if k != "acc4"]
     message_tracker = {}
     
@@ -488,6 +520,8 @@ async def chat_loop():
                         logging.error(f"AI Account 4 error: {e}")
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
+                if csv_index % 50 == 0:
+                    asyncio.create_task(save_state_to_telegram(csv_index))
             except FloodWaitError as e:
                 logging.warning(f"Rate limited! Sleeping for {e.seconds}s")
                 await asyncio.sleep(e.seconds)
@@ -569,6 +603,14 @@ async def main():
         setup_commands(clients["acc4"]["client"])
         
     logging.info("All accounts connected! Waiting for /lockon command...")
+    
+    # Auto-start history sweeper on boot using Account 1
+    if "acc1" in clients and delete_delay > 0:
+        try:
+            entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            asyncio.create_task(history_sweeper(clients["acc1"]["client"], entity, delete_delay))
+        except Exception as e:
+            logging.error(f"Auto-sweeper start failed: {e}")
     
     await chat_loop()
     
