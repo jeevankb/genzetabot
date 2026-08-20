@@ -614,6 +614,19 @@ async def main():
     
     await chat_loop()
     
+    # Start dummy web server for Render health checks
+    from aiohttp import web
+    async def handle(request):
+        return web.Response(text="GunYamazaki Bot is running!")
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Dummy Web Server started on port {port} for Render.")
+    
     while True:
         try:
             await asyncio.gather(*[c["client"].run_until_disconnected() for c in clients.values()])
