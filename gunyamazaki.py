@@ -160,8 +160,15 @@ async def history_sweeper(client, chat_entity, delay_seconds):
         logging.error(f"Error in history sweeper: {e}")
 
 async def simulate_typing(client, entity, text):
+    if message_speed < 3:
+        await asyncio.sleep(message_speed)
+        return
+        
     typing_time = min(max(len(text) * 0.05, 1.0), 8.0)
-    async with client.action(entity, 'typing'):
+    try:
+        async with client.action(entity, 'typing'):
+            await asyncio.sleep(typing_time)
+    except:
         await asyncio.sleep(typing_time)
 
 async def send_dynamic_reply(client, entity, target_msg, text):
