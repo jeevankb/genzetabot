@@ -437,17 +437,21 @@ async def chat_loop():
     logging.info(f"Resuming conversation from CSV index {csv_index}")
     active_keys = [k for k in clients.keys() if k != "acc4"]
     message_tracker = {}
+    import time
+    rate_limited_until = {}
     
     while True:
-        if bot_active and conversation_data and active_keys:
+        current_time = time.time()
+        available_keys = [k for k in active_keys if rate_limited_until.get(k, 0) < current_time]
+        
+        if bot_active and conversation_data and available_keys:
             msg_data = conversation_data[csv_index]
             
             sender_str = msg_data.get("sender", "").strip()
-            # If the CSV specifies a sender that we have connected, use them. Otherwise, pick random.
-            if sender_str in active_keys:
+            if sender_str in available_keys:
                 chosen_key = sender_str
             else:
-                chosen_key = random.choice(active_keys)
+                chosen_key = random.choice(available_keys)
                 
             client = clients[chosen_key]["client"]
             name = clients[chosen_key]["name"]
@@ -486,6 +490,11 @@ async def chat_loop():
                 if reply_to_csv and reply_to_csv in message_tracker:
                     reply_msg_id = message_tracker[reply_to_csv]
                 
+                # Fast forward if text is just [Photo] or [Sticker]
+                if msg_text in ["[Photo]", "[Sticker]", "[Video]", "[GIF]"]:
+                    # Don't try to type a photo tag, it looks weird. Just skip or send something small.
+                    msg_text = "✨"
+                    
                 await simulate_typing(client, entity, msg_text)
                 
                 sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
@@ -523,8 +532,9 @@ async def chat_loop():
                 if csv_index % 50 == 0:
                     asyncio.create_task(save_state_to_telegram(csv_index))
             except FloodWaitError as e:
-                logging.warning(f"Rate limited! Sleeping for {e.seconds}s")
-                await asyncio.sleep(e.seconds)
+                logging.warning(f"[{name}] Rate limited! Pausing this account for {e.seconds}s")
+                rate_limited_until[chosen_key] = current_time + e.seconds
+                continue
             except ConnectionError as e:
                 logging.error(f"Connection dropped! Pausing for 5s to reconnect: {e}")
                 await asyncio.sleep(5)
