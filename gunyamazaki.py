@@ -219,14 +219,15 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/setspeed(?:@genzetabot)?\\s+(.+)'))
     async def setspeed_handler(event):
-        global message_speed
+        global message_speed, bot_active
         try:
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 speed_val = parse_time_to_seconds(event.pattern_match.group(1))
                 if speed_val is not None:
                     message_speed = speed_val
-                    await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds.")
+                    bot_active = True
+                    await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds.\n✅ System Auto-Locked On! Starting conversation loop...")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/setdelete(?:@genzetabot)?\\s+(.+)'))
