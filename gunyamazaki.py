@@ -534,6 +534,12 @@ async def chat_loop():
             except FloodWaitError as e:
                 logging.warning(f"[{name}] Rate limited! Pausing this account for {e.seconds}s")
                 rate_limited_until[chosen_key] = current_time + e.seconds
+                try:
+                    if "acc4" in clients:
+                        acc4_client = clients["acc4"]["client"]
+                        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                        await acc4_client.send_message(acc4_entity, f"⚠️ **Warning**: {name} is sending messages too fast and got rate-limited by Telegram! Pausing them for {e.seconds} seconds.")
+                except: pass
                 continue
             except ConnectionError as e:
                 logging.error(f"Connection dropped! Pausing for 5s to reconnect: {e}")
