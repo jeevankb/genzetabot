@@ -625,6 +625,15 @@ async def main():
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
         
+    # Warm up human accounts entity cache
+    for key, c in clients.items():
+        if key != "acc4":
+            try:
+                await c["client"].get_dialogs(limit=30)
+                logging.info(f"Warmed up entity cache for {c['name']}")
+            except Exception as e:
+                logging.error(f"Failed to warm up cache for {c['name']}: {e}")
+        
     logging.info("All accounts connected! Waiting for /lockon command...")
     
     # Auto-start history sweeper on boot using Account 1
