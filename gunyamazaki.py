@@ -625,12 +625,12 @@ async def main():
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
         
-    # Warm up human accounts entity cache
+    # Warm up human accounts entity cache directly using the join link
     for key, c in clients.items():
         if key != "acc4":
             try:
-                await c["client"].get_dialogs(limit=30)
-                logging.info(f"Warmed up entity cache for {c['name']}")
+                await c["client"].get_entity(TARGET_CHAT)
+                logging.info(f"Warmed up entity cache directly for {c['name']}")
             except Exception as e:
                 logging.error(f"Failed to warm up cache for {c['name']}: {e}")
         
