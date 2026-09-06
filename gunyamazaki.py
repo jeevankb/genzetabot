@@ -49,12 +49,9 @@ TARGET_CHAT_ID = None
 conversation_data = []
 
 # Arise Auto-Catcher Configuration
-ARISE_DATABASE_CHANNEL = os.getenv("ARISE_DATABASE_CHANNEL", "Arise_your_character_database")
 SPAWN_CHAT = os.getenv("SPAWN_CHAT", "https://t.me/+wO6jijXTj1VhNWQ1")
 SPAWN_CHAT_ID = None
 SPAWN_CHAT_TITLE = "Prisoner world"
-ARISE_DB_FILE = "arise_db.json"
-arise_character_db = []
 arise_autocatch_active = True
 account_rate_limited_until = {}
 processed_spawn_ids = set()
@@ -260,161 +257,8 @@ async def send_dynamic_reply(client, entity, target_msg, text):
         logging.error(f"Failed to send dynamic reply: {e}")
 
 # ==========================================
-# ARISE AUTO-CATCHER MODULE
+# ARISE AUTO-CATCHER MODULE (AI VISION)
 # ==========================================
-
-def compute_dhash(image, hash_size=8):
-    """Computes difference hash (dHash) for fast visual comparison."""
-    try:
-        image = image.convert('L').resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
-        pixels = list(image.getdata())
-        diff = []
-        for row in range(hash_size):
-            for col in range(hash_size):
-                left = pixels[row * (hash_size + 1) + col]
-                right = pixels[row * (hash_size + 1) + col + 1]
-                diff.append(left > right)
-        decimal_val = 0
-        for index, value in enumerate(diff):
-            if value:
-                decimal_val |= 1 << index
-        return hex(decimal_val)[2:].zfill(hash_size * hash_size // 4)
-    except Exception as e:
-        logging.error(f"Error computing dHash: {e}")
-        return None
-
-def hamming_distance(h1, h2):
-    """Calculates bit difference between two hex hashes."""
-    try:
-        val1 = int(h1, 16)
-        val2 = int(h2, 16)
-        return bin(val1 ^ val2).count('1')
-    except:
-        return 999
-
-def load_arise_db():
-    global arise_character_db
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(script_dir, ARISE_DB_FILE)
-    if os.path.exists(db_path):
-        try:
-            with open(db_path, "r", encoding="utf-8") as f:
-                arise_character_db = json.load(f)
-            logging.info(f"Loaded {len(arise_character_db)} Arise characters from {ARISE_DB_FILE}.")
-        except Exception as e:
-            logging.error(f"Failed to load {ARISE_DB_FILE}: {e}")
-    else:
-        logging.info(f"{ARISE_DB_FILE} not found. Use /syncarise to scan the database channel.")
-
-def save_arise_db():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(script_dir, ARISE_DB_FILE)
-    try:
-        with open(db_path, "w", encoding="utf-8") as f:
-            json.dump(arise_character_db, f, ensure_ascii=False, indent=2)
-        logging.info(f"Saved {len(arise_character_db)} Arise characters to {ARISE_DB_FILE}.")
-    except Exception as e:
-        logging.error(f"Failed to save {ARISE_DB_FILE}: {e}")
-
-async def sync_arise_database(client, status_callback=None):
-    """Scans the Arise character database channel and builds arise_db.json."""
-    global arise_character_db
-    try:
-        logging.info(f"Scanning Arise database channel: {ARISE_DATABASE_CHANNEL}...")
-        entity = await client.get_entity(ARISE_DATABASE_CHANNEL)
-        existing_ids = {entry["id"] for entry in arise_character_db if "id" in entry}
-        
-        new_entries = []
-        scanned_count = 0
-        
-        async for msg in client.iter_messages(entity, limit=4000):
-            if not msg.photo or not msg.text:
-                continue
-                
-            match = re.search(r'\b(\d+):\s*([^\n\(\)]+)', msg.text)
-            if not match:
-                continue
-                
-            char_id = int(match.group(1))
-            char_name = match.group(2).strip()
-            
-            if char_id in existing_ids:
-                continue
-                
-            anime_match = re.search(r'Anime:\s*([^\n\[]+)', msg.text)
-            anime_name = anime_match.group(1).strip() if anime_match else ""
-            
-            photo_bytes = io.BytesIO()
-            await client.download_media(msg, file=photo_bytes, thumb=-1)
-            photo_bytes.seek(0)
-            
-            try:
-                img = Image.open(photo_bytes)
-                img_hash = compute_dhash(img)
-                if img_hash:
-                    entry = {
-                        "id": char_id,
-                        "name": char_name,
-                        "anime": anime_name,
-                        "hash": img_hash,
-                        "msg_id": msg.id
-                    }
-                    new_entries.append(entry)
-                    existing_ids.add(char_id)
-                    scanned_count += 1
-                    if scanned_count % 50 == 0:
-                        logging.info(f"[Arise Sync] Indexed {scanned_count} characters...")
-                        save_arise_db()
-                        if status_callback:
-                            await status_callback(f"⏳ Indexed {scanned_count} characters...")
-            except Exception as e:
-                pass
-                
-        if new_entries:
-            arise_character_db.extend(new_entries)
-            save_arise_db()
-            logging.info(f"Database sync complete! Added {len(new_entries)} characters. Total: {len(arise_character_db)}")
-            try:
-                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ARISE_DB_FILE)
-                await client.send_message(
-                    "me",
-                    f"📁 **Arise Database Built!** ({len(arise_character_db)} characters)\nDownload this file and add it to your GitHub repository for instant zero-delay auto-catching!",
-                    file=db_path
-                )
-                logging.info("Sent arise_db.json to Account 1 Saved Messages!")
-            except Exception as se:
-                logging.warning(f"Could not send arise_db.json to Saved Messages: {se}")
-            return len(new_entries), len(arise_character_db)
-        else:
-            logging.info("Arise database is already up to date.")
-            return 0, len(arise_character_db)
-    except Exception as e:
-        logging.error(f"Error syncing Arise database: {e}")
-        return -1, len(arise_character_db)
-
-def find_best_character_match(image_bytes):
-    """Matches a spawn image against the indexed Arise database."""
-    if not arise_character_db:
-        return None, 999
-    try:
-        img = Image.open(image_bytes)
-        spawn_hash = compute_dhash(img)
-        if not spawn_hash:
-            return None, 999
-            
-        best_match = None
-        min_dist = 999
-        for entry in arise_character_db:
-            dist = hamming_distance(spawn_hash, entry["hash"])
-            if dist < min_dist:
-                min_dist = dist
-                best_match = entry
-                if dist == 0:
-                    break
-        return best_match, min_dist
-    except Exception as e:
-        logging.error(f"Error matching character: {e}")
-        return None, 999
 
 async def handle_spawn_message(event):
     """Processes gate spawn messages and catches the character using Account 1 (with Acc 2/3 fallback)."""
@@ -463,7 +307,7 @@ async def handle_spawn_message(event):
         logging.warning("[Auto-Catcher] Gate spawn message has no media attached. Skipping.")
         return
         
-    logging.info(f"[Auto-Catcher] Gate spawn with media detected in '{SPAWN_CHAT_TITLE}' ({event.chat_id})! Downloading image...")
+    logging.info(f"[Auto-Catcher] Gate spawn with media detected in '{SPAWN_CHAT_TITLE}' ({event.chat_id})! Downloading image in-memory...")
     
     photo_bytes = io.BytesIO()
     try:
@@ -474,45 +318,38 @@ async def handle_spawn_message(event):
             if raw:
                 photo_bytes = io.BytesIO(raw)
     except Exception as e:
-        logging.error(f"[Auto-Catcher] Failed to download spawn photo: {e}")
+        logging.error(f"[Auto-Catcher] Failed to read spawn photo: {e}")
         return
         
     char_name = None
-    best_match, dist = find_best_character_match(photo_bytes)
-    if best_match and dist <= 10:
-        char_name = best_match["name"]
-        logging.info(f"🎯 [Auto-Catcher] DATABASE MATCH: '{char_name}' (distance: {dist}/64)")
-    else:
-        # High-Speed Gemini Vision Fallback (Works 100% of the time, even if local DB is still building)
-        logging.info(f"[Auto-Catcher] Database match distance ({dist}) too high or DB empty. Using Gemini Vision AI fallback...")
-        if HAS_GENAI and gemini_client:
+    if HAS_GENAI and gemini_client:
+        try:
+            photo_bytes.seek(0)
+            img = Image.open(photo_bytes)
+            prompt = (
+                "Identify this anime or video game character shown in the image. "
+                "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki', 'Lumine'). "
+                "Do NOT include anime title, commentary, markdown, or punctuation. ONLY the character name."
+            )
             try:
-                photo_bytes.seek(0)
-                img = Image.open(photo_bytes)
-                prompt = (
-                    "Identify this anime or video game character shown in the image. "
-                    "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki', 'Lumine'). "
-                    "Do NOT include anime title, commentary, markdown, or punctuation. ONLY the character name."
+                res = await gemini_client.aio.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[img, prompt]
                 )
-                try:
-                    res = await gemini_client.aio.models.generate_content(
-                        model="gemini-3.6-flash",
-                        contents=[img, prompt]
-                    )
-                except Exception as aio_err:
-                    logging.warning(f"[Auto-Catcher] Async Gemini Vision failed ({aio_err}). Trying sync call...")
-                    res = gemini_client.models.generate_content(
-                        model="gemini-3.6-flash",
-                        contents=[img, prompt]
-                    )
-                if res and res.text:
-                    char_name = res.text.strip().replace('\n', '').strip('".*')
-                    logging.info(f"🎯 [Auto-Catcher] GEMINI VISION IDENTIFIED: '{char_name}'")
-            except Exception as ge:
-                logging.error(f"[Auto-Catcher] Gemini Vision fallback failed: {ge}")
-                
+            except Exception as aio_err:
+                logging.warning(f"[Auto-Catcher] Async Gemini Vision failed ({aio_err}). Trying sync call...")
+                res = gemini_client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[img, prompt]
+                )
+            if res and res.text:
+                char_name = res.text.strip().replace('\n', '').strip('".*')
+                logging.info(f"🎯 [Auto-Catcher] GEMINI VISION IDENTIFIED: '{char_name}'")
+        except Exception as ge:
+            logging.error(f"[Auto-Catcher] Gemini Vision identification failed: {ge}")
+            
     if not char_name:
-        logging.warning("[Auto-Catcher] Could not identify character name via database or Gemini Vision. Skipping.")
+        logging.warning("[Auto-Catcher] Could not identify character name via Gemini Vision. Skipping.")
         return
         
     logging.info(f"🏆 [Auto-Catcher] Target Locked: '{char_name}'. Preparing to catch in {SPAWN_CHAT_TITLE}...")
@@ -570,27 +407,8 @@ def setup_commands(bot_client):
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
                 del_str = format_seconds_to_readable(delete_delay)
                 catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
-                catch_status = f"🟢 ONLINE ({len(arise_character_db)} chars | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
+                catch_status = f"🟢 ONLINE (Gemini AI Vision | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
                 await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nAuto-Catch: {catch_status}\nMessages Sent: {total_messages_sent}")
-        except: pass
-
-    @bot_client.on(events.NewMessage(pattern='(?i)^/syncarise(?:@genzetabot)?$'))
-    async def syncarise_handler(event):
-        try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
-                status_msg = await event.reply("🔄 Scanning @Arise_your_character_database for character cards... Please wait!")
-                async def update_status(text):
-                    try: await status_msg.edit(text)
-                    except: pass
-                if "acc1" in clients:
-                    new_added, total = await sync_arise_database(clients["acc1"]["client"], update_status)
-                    if new_added >= 0:
-                        await status_msg.edit(f"✅ **Arise Database Synced!**\n\nNew Characters Added: {new_added}\nTotal in Database: {total}")
-                    else:
-                        await status_msg.edit("❌ Failed to sync database! Check logs for details.")
-                else:
-                    await status_msg.edit("❌ Account 1 is not connected to perform the sync.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/ariseon(?:@genzetabot)?$'))
@@ -633,25 +451,6 @@ def setup_commands(bot_client):
                 )
                 logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
         except: pass
-
-    @bot_client.on(events.NewMessage(pattern='(?i)^/(?:exportarise|getdb|sendarise)(?:@genzetabot)?$'))
-    async def exportarise_handler(event):
-        try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
-                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ARISE_DB_FILE)
-                if os.path.exists(db_path) and len(arise_character_db) > 0:
-                    await event.reply(
-                        f"📦 **Arise Character Database Export**\n\n"
-                        f"Characters Indexed: **{len(arise_character_db)}**\n"
-                        f"File Size: **{os.path.getsize(db_path) // 1024} KB**\n\n"
-                        f"Save this `arise_db.json` into your GitHub repository for instant zero-delay auto-catching!",
-                        file=db_path
-                    )
-                else:
-                    await event.reply(f"⏳ Database currently has {len(arise_character_db)} characters and is still indexing. Please wait a bit or use `/syncarise`!")
-        except Exception as e:
-            await event.reply(f"Error sending database: {e}")
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
@@ -1156,12 +955,7 @@ async def main():
     # Launch 15-minute periodic sweeper for long intervals (e.g. 4 days)
     asyncio.create_task(periodic_history_sweeper())
     
-    # Initialize Arise Character Database & Auto-Catcher
-    load_arise_db()
-    if not arise_character_db and "acc1" in clients:
-        logging.info("Arise database empty on boot. Starting background sync from @Arise_your_character_database...")
-        asyncio.create_task(sync_arise_database(clients["acc1"]["client"]))
-        
+
     global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
     if "acc1" in clients:
         # Step 1: Search dialogs of Account 1 for "prisoner"
