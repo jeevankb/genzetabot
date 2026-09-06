@@ -398,22 +398,24 @@ async def handle_spawn_message(event):
         return
         
     # STRICT FILTER: ONLY collect in the target group (Prisoner world)
-    target = SPAWN_CHAT_ID or TARGET_CHAT_ID
-    if target:
-        if event.chat_id != target:
-            return  # NEVER catch in Arise main group or any other chat
+    chat_title = ""
+    try:
+        chat = await event.get_chat()
+        chat_title = (getattr(chat, 'title', '') or '').strip()
+    except Exception:
+        pass
+
+    # If this message is from Prisoner world, ALWAYS ACCEPT and lock onto it!
+    if "prisoner" in chat_title.lower():
+        SPAWN_CHAT_ID = event.chat_id
+        SPAWN_CHAT_TITLE = chat_title or "Prisoner world"
+    elif SPAWN_CHAT_ID and event.chat_id == SPAWN_CHAT_ID:
+        pass
+    elif TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID:
+        pass
     else:
-        try:
-            chat = await event.get_chat()
-            title = (getattr(chat, 'title', '') or '').lower()
-            if "prisoner" in title:
-                SPAWN_CHAT_ID = event.chat_id
-                SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Prisoner world')
-                logging.info(f"Locked Auto-Catcher to '{SPAWN_CHAT_TITLE}' ({event.chat_id})")
-            else:
-                return  # Reject
-        except Exception:
-            return
+        # Ignore main group and any unrelated group!
+        return
 
     if event.id in processed_spawn_ids:
         return
@@ -438,9 +440,9 @@ async def handle_spawn_message(event):
     
     photo_bytes = io.BytesIO()
     try:
-        raw_bytes = await event.download_media(file=bytes)
+        raw_bytes = await event.message.download_media(file=bytes)
         if not raw_bytes:
-            await event.download_media(file=photo_bytes)
+            await event.message.download_media(file=photo_bytes)
             photo_bytes.seek(0)
         else:
             photo_bytes = io.BytesIO(raw_bytes)
@@ -462,7 +464,7 @@ async def handle_spawn_message(event):
                 img = Image.open(photo_bytes)
                 prompt = (
                     "Identify this anime or video game character shown in the image. "
-                    "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki'). "
+                    "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki', 'Lumine'). "
                     "Do NOT include anime title, commentary, markdown, or punctuation. ONLY the character name."
                 )
                 res = await gemini_client.aio.models.generate_content(
@@ -481,8 +483,8 @@ async def handle_spawn_message(event):
         
     logging.info(f"🏆 [Auto-Catcher] Target Locked: '{char_name}'. Preparing to catch in {SPAWN_CHAT_TITLE}...")
     
-    # Natural reaction delay (1.0s to 1.8s)
-    await asyncio.sleep(random.uniform(1.0, 1.8))
+    # Fast natural reaction delay (0.15s to 0.35s) so Account 1 catches BEFORE anyone else in group
+    await asyncio.sleep(random.uniform(0.15, 0.35))
     
     order = ["acc1", "acc2", "acc3"]
     current_time = time.time()
@@ -1157,28 +1159,28 @@ async def main():
                 if not event.is_group and not event.is_channel:
                     return
                 # STRICT GROUP FILTER: ONLY collect in the target group (Prisoner world)!
-                target = SPAWN_CHAT_ID or TARGET_CHAT_ID
-                if target:
-                    if event.chat_id != target:
-                        return  # Reject all other chats (e.g. Arise main group)
+                chat_title = ""
+                try:
+                    chat = await event.get_chat()
+                    chat_title = (getattr(chat, 'title', '') or '').strip()
+                except Exception:
+                    pass
+
+                # If from Prisoner world, ALWAYS process and lock onto it!
+                if "prisoner" in chat_title.lower():
+                    globals()['SPAWN_CHAT_ID'] = event.chat_id
+                    globals()['SPAWN_CHAT_TITLE'] = chat_title or "Prisoner world"
+                elif SPAWN_CHAT_ID and event.chat_id == SPAWN_CHAT_ID:
+                    pass
+                elif TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID:
+                    pass
                 else:
-                    try:
-                        chat = await event.get_chat()
-                        title = (getattr(chat, 'title', '') or '').lower()
-                        if "prisoner" in title:
-                            globals()['SPAWN_CHAT_ID'] = event.chat_id
-                            globals()['SPAWN_CHAT_TITLE'] = getattr(chat, 'title', 'Prisoner world')
-                            logging.info(f"Auto-locked SPAWN_CHAT_ID to '{getattr(chat, 'title', '')}' ({event.chat_id})")
-                        else:
-                            return
-                    except Exception:
-                        return
+                    return
+
                 await handle_spawn_message(event)
     logging.info(f"Arise Auto-Catcher listener registered! Locked to: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
     
-    await chat_loop()
-    
-    # Start dummy web server for Render health checks
+    # 1. Start dummy web server for Render health checks FIRST!
     from aiohttp import web
     async def handle(request):
         return web.Response(text="GunYamazaki Bot is running!")
@@ -1190,7 +1192,11 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logging.info(f"Dummy Web Server started on port {port} for Render.")
+
+    # 2. Run conversation loop as a background task!
+    asyncio.create_task(chat_loop())
     
+    # 3. Keep all account connections alive
     while True:
         try:
             await asyncio.gather(*[c["client"].run_until_disconnected() for c in clients.values()])
