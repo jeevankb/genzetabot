@@ -49,6 +49,7 @@ conversation_data = []
 ARISE_DATABASE_CHANNEL = os.getenv("ARISE_DATABASE_CHANNEL", "Arise_your_character_database")
 SPAWN_CHAT = os.getenv("SPAWN_CHAT", "https://t.me/+wO6jijXTj1VhNWQ1")
 SPAWN_CHAT_ID = None
+SPAWN_CHAT_TITLE = "Prisoner world"
 ARISE_DB_FILE = "arise_db.json"
 arise_character_db = []
 arise_autocatch_active = True
@@ -392,10 +393,28 @@ def find_best_character_match(image_bytes):
 
 async def handle_spawn_message(event):
     """Processes gate spawn messages and catches the character using Account 1 (with Acc 2/3 fallback)."""
-    global account_rate_limited_until, processed_spawn_ids
+    global account_rate_limited_until, processed_spawn_ids, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
     if not arise_autocatch_active:
         return
         
+    # STRICT FILTER: ONLY collect in the target group (Prisoner world)
+    target = SPAWN_CHAT_ID or TARGET_CHAT_ID
+    if target:
+        if event.chat_id != target:
+            return  # NEVER catch in Arise main group or any other chat
+    else:
+        try:
+            chat = await event.get_chat()
+            title = (getattr(chat, 'title', '') or '').lower()
+            if "prisoner" in title:
+                SPAWN_CHAT_ID = event.chat_id
+                SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Prisoner world')
+                logging.info(f"Locked Auto-Catcher to '{SPAWN_CHAT_TITLE}' ({event.chat_id})")
+            else:
+                return  # Reject
+        except Exception:
+            return
+
     if event.id in processed_spawn_ids:
         return
     processed_spawn_ids.add(event.id)
@@ -403,18 +422,28 @@ async def handle_spawn_message(event):
         processed_spawn_ids.pop()
         
     text = (event.raw_text or "").upper()
-    if "THE GATE WAS SPAWNED" not in text and "/ARISE" not in text:
+    is_spawn = (
+        ("THE GATE WAS SPAWNED" in text) or
+        ("ADD THIS CHARACTER TO YOUR ARMY" in text) or
+        ("/ARISE" in text and "ARMY" in text) or
+        ("GATE" in text and "SPAWN" in text)
+    )
+    if not is_spawn:
         return
         
     if not event.media:
         return
         
-    logging.info(f"[Auto-Catcher] Gate spawn detected in chat {event.chat_id}! Identifying character...")
+    logging.info(f"[Auto-Catcher] Gate spawn detected in '{SPAWN_CHAT_TITLE}' ({event.chat_id})! Identifying character...")
     
     photo_bytes = io.BytesIO()
     try:
-        await event.download_media(file=photo_bytes, thumb=-1)
-        photo_bytes.seek(0)
+        raw_bytes = await event.download_media(file=bytes)
+        if not raw_bytes:
+            await event.download_media(file=photo_bytes)
+            photo_bytes.seek(0)
+        else:
+            photo_bytes = io.BytesIO(raw_bytes)
     except Exception as e:
         logging.error(f"[Auto-Catcher] Failed to download spawn photo: {e}")
         return
@@ -431,7 +460,11 @@ async def handle_spawn_message(event):
             try:
                 photo_bytes.seek(0)
                 img = Image.open(photo_bytes)
-                prompt = "Identify this anime or video game character. Return ONLY the exact character name in English (e.g. 'Lain Iwakura' or 'Ruan Mei'), nothing else. No punctuation, no show title."
+                prompt = (
+                    "Identify this anime or video game character shown in the image. "
+                    "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki'). "
+                    "Do NOT include anime title, commentary, markdown, or punctuation. ONLY the character name."
+                )
                 res = await gemini_client.aio.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=[img, prompt]
@@ -446,10 +479,10 @@ async def handle_spawn_message(event):
         logging.warning("[Auto-Catcher] Could not identify character name via database or Gemini Vision. Skipping.")
         return
         
-    logging.info(f"🏆 [Auto-Catcher] Target Locked: '{char_name}'. Preparing to catch...")
+    logging.info(f"🏆 [Auto-Catcher] Target Locked: '{char_name}'. Preparing to catch in {SPAWN_CHAT_TITLE}...")
     
-    # Natural reaction delay (1.2s to 2.0s)
-    await asyncio.sleep(random.uniform(1.2, 2.0))
+    # Natural reaction delay (1.0s to 1.8s)
+    await asyncio.sleep(random.uniform(1.0, 1.8))
     
     order = ["acc1", "acc2", "acc3"]
     current_time = time.time()
@@ -468,8 +501,19 @@ async def handle_spawn_message(event):
         
         try:
             catch_cmd = f"/arise {char_name}"
-            await catcher_client.send_message(event.chat_id, catch_cmd, reply_to=event.message.id)
-            logging.info(f"🏆 [Auto-Catcher] {catcher_name} SENT: {catch_cmd}")
+            # Ensure entity is resolved for this client
+            try:
+                target_entity = await catcher_client.get_input_entity(event.chat_id)
+            except Exception:
+                target_entity = event.chat_id
+                
+            try:
+                await catcher_client.send_message(target_entity, catch_cmd, reply_to=event.message.id)
+            except Exception as reply_err:
+                logging.warning(f"[Auto-Catcher] Reply-to failed ({reply_err}), sending without reply...")
+                await catcher_client.send_message(target_entity, catch_cmd)
+                
+            logging.info(f"🏆 [Auto-Catcher] {catcher_name} SENT: '{catch_cmd}' in {SPAWN_CHAT_TITLE} ({event.chat_id})")
             return
         except FloodWaitError as fe:
             logging.warning(f"[Auto-Catcher] {catcher_name} got rate-limited for {fe.seconds}s! Failing over to next account...")
@@ -489,7 +533,8 @@ def setup_commands(bot_client):
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
                 del_str = format_seconds_to_readable(delete_delay)
-                catch_status = f"🟢 ONLINE ({len(arise_character_db)} chars)" if arise_autocatch_active else "🔴 OFFLINE"
+                catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
+                catch_status = f"🟢 ONLINE ({len(arise_character_db)} chars | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
                 await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nAuto-Catch: {catch_status}\nMessages Sent: {total_messages_sent}")
         except: pass
 
@@ -519,7 +564,7 @@ def setup_commands(bot_client):
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 arise_autocatch_active = True
-                await event.reply("✅ Arise Auto-Catcher is now **ONLINE**! Watching for gate spawns.")
+                await event.reply(f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/ariseoff(?:@genzetabot)?$'))
@@ -532,18 +577,49 @@ def setup_commands(bot_client):
                 await event.reply("🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
+    @bot_client.on(events.NewMessage(pattern='(?i)^/(?:arisehere|lockarise)(?:@genzetabot)?$'))
+    async def arisehere_handler(event):
+        global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE, arise_autocatch_active
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                SPAWN_CHAT_ID = event.chat_id
+                arise_autocatch_active = True
+                try:
+                    chat = await event.get_chat()
+                    SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
+                except: pass
+                await event.reply(
+                    f"🎯 **Arise Auto-Catcher LOCKED!**\n\n"
+                    f"Group: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)\n"
+                    f"Status: 🟢 **ONLINE**\n\n"
+                    f"The bot will **ONLY** catch character gates inside this group and ignore all other groups!"
+                )
+                logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
+        except: pass
+
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
-        global bot_active, BOT_ENTITY, TARGET_CHAT_ID
+        global bot_active, BOT_ENTITY, TARGET_CHAT_ID, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
         BOT_ENTITY = event.input_chat
         TARGET_CHAT_ID = event.chat_id
+        SPAWN_CHAT_ID = event.chat_id
+        try:
+            chat = await event.get_chat()
+            SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
+        except: pass
         # Only allow Account 1 to use this command
         try:
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 bot_active = True
-                await event.reply(f"✅ GunYamazaki System Locked On to chat {TARGET_CHAT_ID}. Starting conversation loop...")
-                logging.info(f"System LOCKED ON to {TARGET_CHAT_ID} by admin.")
+                await event.reply(
+                    f"✅ **GunYamazaki System & Auto-Catcher LOCKED ON!**\n\n"
+                    f"Target Group: **{SPAWN_CHAT_TITLE}** (`{TARGET_CHAT_ID}`)\n"
+                    f"Auto-Catch: 🟢 **ONLINE** (Strictly this group only)\n"
+                    f"Conversation Loop: 🟢 **STARTED**"
+                )
+                logging.info(f"System & Arise Auto-Catcher LOCKED ON to {TARGET_CHAT_ID} ('{SPAWN_CHAT_TITLE}') by admin.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff(?:@genzetabot)?$'))
@@ -979,13 +1055,13 @@ async def main():
                 for d in dialogs:
                     if d.is_group or d.is_channel:
                         title = (d.title or "").lower()
-                        if any(term in title for term in ["mafia", "tarot", "anime", "limited", "club"]) or not TARGET_CHAT_ID:
+                        if any(term in title for term in ["prisoner", "mafia", "tarot", "anime", "limited", "club"]) or not TARGET_CHAT_ID:
                             TARGET_CHAT_ID = d.id
                             if hasattr(d.entity, 'access_hash'):
                                 from telethon.tl.types import InputPeerChannel
                                 TARGET_INPUT_PEER = InputPeerChannel(d.entity.id, d.entity.access_hash)
                             logging.info(f"Auto-discovered active group from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                            if any(term in title for term in ["mafia", "tarot", "anime", "limited", "club"]):
+                            if any(term in title for term in ["prisoner", "mafia", "tarot", "anime", "limited", "club"]):
                                 break
             except Exception as dialog_err:
                 logging.error(f"Dialog fallback search failed: {dialog_err}")
@@ -1029,15 +1105,49 @@ async def main():
         logging.info("Arise database empty on boot. Starting background sync from @Arise_your_character_database...")
         asyncio.create_task(sync_arise_database(clients["acc1"]["client"]))
         
-    global SPAWN_CHAT_ID
-    if "acc1" in clients and SPAWN_CHAT:
+    global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
+    if "acc1" in clients:
+        # Step 1: Search dialogs of Account 1 for "prisoner"
         try:
-            spawn_ent = await clients["acc1"]["client"].get_entity(SPAWN_CHAT)
-            SPAWN_CHAT_ID = utils.get_peer_id(spawn_ent)
-            logging.info(f"Resolved SPAWN_CHAT to ID: {SPAWN_CHAT_ID}")
-        except Exception as e:
-            logging.warning(f"Could not resolve SPAWN_CHAT ({e}). Auto-catcher will detect spawns by gate content.")
-            
+            dialogs = await clients["acc1"]["client"].get_dialogs(limit=100)
+            for d in dialogs:
+                if d.is_group or d.is_channel:
+                    t = (d.title or "").strip()
+                    if "prisoner" in t.lower():
+                        SPAWN_CHAT_ID = d.id
+                        SPAWN_CHAT_TITLE = t
+                        logging.info(f"🎯 Auto-discovered target group from dialogs: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
+                        break
+        except Exception as de:
+            logging.warning(f"Failed scanning dialogs for Prisoner group: {de}")
+
+        # Step 2: If not found yet, try resolving SPAWN_CHAT link or ID
+        if not SPAWN_CHAT_ID and SPAWN_CHAT:
+            try:
+                if isinstance(SPAWN_CHAT, str) and (SPAWN_CHAT.startswith("-100") or SPAWN_CHAT.lstrip('-').isdigit()):
+                    spawn_ent = await clients["acc1"]["client"].get_entity(int(SPAWN_CHAT))
+                else:
+                    spawn_ent = await clients["acc1"]["client"].get_entity(SPAWN_CHAT)
+                SPAWN_CHAT_ID = utils.get_peer_id(spawn_ent)
+                if hasattr(spawn_ent, 'title') and spawn_ent.title:
+                    SPAWN_CHAT_TITLE = spawn_ent.title
+                logging.info(f"Resolved SPAWN_CHAT to ID: {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
+            except Exception as e:
+                logging.warning(f"Could not resolve SPAWN_CHAT via link ({e}). Auto-catcher will lock when /lockon or /arisehere is used.")
+
+        # Step 3: Default to TARGET_CHAT_ID if set
+        if not SPAWN_CHAT_ID and TARGET_CHAT_ID:
+            SPAWN_CHAT_ID = TARGET_CHAT_ID
+
+    # Warm up entity cache for SPAWN_CHAT_ID on all accounts
+    if SPAWN_CHAT_ID and isinstance(SPAWN_CHAT_ID, int):
+        for key, c in clients.items():
+            if key != "acc4":
+                try:
+                    await c["client"].get_entity(SPAWN_CHAT_ID)
+                except Exception:
+                    pass
+
     # Register Arise Gate spawn listener
     for key in ["acc1", "acc2", "acc3"]:
         if key in clients:
@@ -1046,8 +1156,25 @@ async def main():
             async def spawn_watcher(event):
                 if not event.is_group and not event.is_channel:
                     return
+                # STRICT GROUP FILTER: ONLY collect in the target group (Prisoner world)!
+                target = SPAWN_CHAT_ID or TARGET_CHAT_ID
+                if target:
+                    if event.chat_id != target:
+                        return  # Reject all other chats (e.g. Arise main group)
+                else:
+                    try:
+                        chat = await event.get_chat()
+                        title = (getattr(chat, 'title', '') or '').lower()
+                        if "prisoner" in title:
+                            globals()['SPAWN_CHAT_ID'] = event.chat_id
+                            globals()['SPAWN_CHAT_TITLE'] = getattr(chat, 'title', 'Prisoner world')
+                            logging.info(f"Auto-locked SPAWN_CHAT_ID to '{getattr(chat, 'title', '')}' ({event.chat_id})")
+                        else:
+                            return
+                    except Exception:
+                        return
                 await handle_spawn_message(event)
-    logging.info("Arise Auto-Catcher listener registered for gate spawns.")
+    logging.info(f"Arise Auto-Catcher listener registered! Locked to: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
     
     await chat_loop()
     
