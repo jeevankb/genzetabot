@@ -80,7 +80,7 @@ def load_csv():
 # Global state
 bot_active = False
 message_speed = 15
-delete_delay = int(os.getenv("DELETE_DELAY", 604800))  # Default 7 days (604,800s)
+delete_delay = int(os.getenv("DELETE_DELAY", 900))  # Default 15 minutes (changeable anytime by User 1 via /setdelete)
 total_messages_sent = 0
 clients = {}
 STATE_MSG_ID = None
@@ -144,28 +144,25 @@ def format_seconds_to_readable(seconds):
 def parse_time_to_seconds(time_str):
     if not time_str: return None
     time_str = time_str.lower().strip().replace(" ", "")
+    if time_str in ("0", "off", "disable", "none", "stop"):
+        return 0
     try:
-        # Check weeks
-        if time_str.endswith(('weeks', 'week', 'w')):
-            val = time_str.rstrip('weeks').rstrip('week').rstrip('w')
-            return int(val) * 604800
-        # Check days (e.g. 4days, 4day, 4d)
-        elif time_str.endswith(('days', 'day', 'd')):
-            val = time_str.rstrip('days').rstrip('day').rstrip('d')
-            return int(val) * 86400
-        # Check hours (e.g. 12hours, 12hour, 12h)
-        elif time_str.endswith(('hours', 'hour', 'h')):
-            val = time_str.rstrip('hours').rstrip('hour').rstrip('h')
-            return int(val) * 3600
-        # Check minutes (e.g. 15mins, 15min, 15m)
-        elif time_str.endswith(('mins', 'min', 'm')):
-            val = time_str.rstrip('mins').rstrip('min').rstrip('m')
-            return int(val) * 60
-        # Check seconds (e.g. 30secs, 30sec, 30s)
-        elif time_str.endswith(('secs', 'sec', 's')):
-            val = time_str.rstrip('secs').rstrip('sec').rstrip('s')
+        m = re.match(r'^(\d+(?:\.\d+)?)(w|week|weeks|d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)?$', time_str)
+        if not m:
+            return None
+        val = float(m.group(1))
+        unit = m.group(2) or "s"
+        if unit.startswith("w"):
+            return int(val * 604800)
+        elif unit.startswith("d"):
+            return int(val * 86400)
+        elif unit.startswith("h"):
+            return int(val * 3600)
+        elif unit.startswith("m"):
+            return int(val * 60)
+        elif unit.startswith("s"):
             return int(val)
-        return int(time_str)
+        return int(val)
     except:
         return None
 
@@ -487,32 +484,63 @@ def setup_commands(bot_client):
                 logging.info("System LOCKED OFF by admin.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/setspeed(?:@genzetabot)?\\s+(.+)'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
         global message_speed
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
-                speed_val = parse_time_to_seconds(event.pattern_match.group(1))
-                if speed_val is not None:
-                    message_speed = speed_val
+            sender_id = event.sender_id
+            if not sender_id:
+                try:
+                    s = await event.get_sender()
+                    sender_id = getattr(s, 'id', None)
+                except: pass
+            if sender_id == accounts["acc1"]["user_id"]:
+                arg = event.pattern_match.group(1)
+                if not arg or not arg.strip():
+                    await event.reply(f"⚡ **Current Speed:** 1 message every **{message_speed}s**.\nTo change, use: `/setspeed 15s` or `/setspeed 30s`.")
+                    return
+                speed_val = parse_time_to_seconds(arg.strip())
+                if speed_val is not None and speed_val > 0:
+                    message_speed = int(speed_val)
                     await save_state_to_telegram()
-                    await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds. (Saved)")
-        except: pass
+                    await event.reply(f"⚡ Speed set to 1 message every **{message_speed} seconds** by User 1. (Saved)")
+                else:
+                    await event.reply("❌ Invalid speed! Example: `/setspeed 15s` or `/setspeed 30s`.")
+        except Exception as e:
+            logging.error(f"Error in setspeed_handler: {e}")
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/setdelete(?:@genzetabot)?\\s+(.+)'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setdelete_handler(event):
         global delete_delay
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
-                raw_val = event.pattern_match.group(1).strip()
+            sender_id = event.sender_id
+            if not sender_id:
+                try:
+                    s = await event.get_sender()
+                    sender_id = getattr(s, 'id', None)
+                except: pass
+            if sender_id == accounts["acc1"]["user_id"]:
+                arg = event.pattern_match.group(1)
+                if not arg or not arg.strip():
+                    readable = format_seconds_to_readable(delete_delay)
+                    await event.reply(
+                        f"🗑 **Current Auto-Delete:** **{readable}** ({delete_delay}s)\n\n"
+                        f"User 1 can set this to any duration anytime:\n"
+                        f"• `/setdelete 15m` (15 minutes)\n"
+                        f"• `/setdelete 1h` (1 hour)\n"
+                        f"• `/setdelete 12h` (12 hours)\n"
+                        f"• `/setdelete 1d` (1 day)\n"
+                        f"• `/setdelete 7days` (7 days)\n"
+                        f"• `/setdelete 0` (disable auto-delete)"
+                    )
+                    return
+                raw_val = arg.strip()
                 del_val = parse_time_to_seconds(raw_val)
                 if del_val is not None:
                     delete_delay = del_val
                     readable = format_seconds_to_readable(delete_delay)
                     await save_state_to_telegram()
-                    await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s). Starting sweep...")
+                    await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by User 1! Starting sweep...")
                     try:
                         acc1_client = clients["acc1"]["client"]
                         target = TARGET_CHAT_ID or TARGET_CHAT
@@ -522,8 +550,9 @@ def setup_commands(bot_client):
                         asyncio.create_task(history_sweeper(acc1_client, entity, delete_delay))
                     except: pass
                 else:
-                    await event.reply("❌ Invalid time format! You can use: `/setdelete 7days`, `/setdelete 4d`, `/setdelete 12h`, `/setdelete 15m`, `/setdelete 30s`, or `/setdelete 0`.")
-        except: pass
+                    await event.reply("❌ Invalid time format! You can use: `/setdelete 15m`, `/setdelete 1h`, `/setdelete 1d`, `/setdelete 7days`, `/setdelete 30s`, or `/setdelete 0`.")
+        except Exception as e:
+            logging.error(f"Error in setdelete_handler: {e}")
 
     @bot_client.on(events.NewMessage())
     async def auto_delete_handler(event):
@@ -533,7 +562,7 @@ def setup_commands(bot_client):
         if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
             return
         BOT_ENTITY = event.input_chat
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/setspeed")):
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/autodelete", "/setdel", "/delete", "/setspeed", "/speed", "/stats", "/arise")):
             return
             
         try:
@@ -926,6 +955,45 @@ async def main():
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
         
+    if "acc1" in clients:
+        acc1_c = clients["acc1"]["client"]
+        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
+        async def acc1_saved_setdelete(event):
+            try:
+                if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) == accounts["acc1"]["user_id"])):
+                    global delete_delay
+                    arg = event.pattern_match.group(1)
+                    if not arg or not arg.strip():
+                        readable = format_seconds_to_readable(delete_delay)
+                        await event.reply(
+                            f"🗑 **Current Auto-Delete:** **{readable}** ({delete_delay}s)\n\n"
+                            f"Set to any duration anytime:\n"
+                            f"• `/setdelete 15m` (15 minutes)\n"
+                            f"• `/setdelete 1h` (1 hour)\n"
+                            f"• `/setdelete 12h` (12 hours)\n"
+                            f"• `/setdelete 1d` (1 day)\n"
+                            f"• `/setdelete 7days` (7 days)\n"
+                            f"• `/setdelete 0` (disable)"
+                        )
+                        return
+                    del_val = parse_time_to_seconds(arg.strip())
+                    if del_val is not None:
+                        delete_delay = del_val
+                        readable = format_seconds_to_readable(delete_delay)
+                        await save_state_to_telegram()
+                        await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by User 1! (Saved)")
+                        try:
+                            target = TARGET_CHAT_ID or TARGET_CHAT
+                            if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
+                                target = int(target)
+                            entity = await acc1_c.get_entity(target)
+                            asyncio.create_task(history_sweeper(acc1_c, entity, delete_delay))
+                        except: pass
+                    else:
+                        await event.reply("❌ Invalid format! Example: `/setdelete 15m`, `/setdelete 1h`, `/setdelete 7days`")
+            except Exception as e:
+                logging.error(f"Error in acc1_saved_setdelete: {e}")
+
     # Warm up human accounts entity cache safely
     for key, c in clients.items():
         if key != "acc4":
