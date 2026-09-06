@@ -10,6 +10,10 @@ import random
 import logging
 import re
 import datetime
+import io
+import json
+import time
+from PIL import Image
 from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, utils
@@ -40,6 +44,16 @@ CSV_FILE = "anime_group_chat_10000.csv"
 TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
 TARGET_CHAT_ID = None
 conversation_data = []
+
+# Arise Auto-Catcher Configuration
+ARISE_DATABASE_CHANNEL = os.getenv("ARISE_DATABASE_CHANNEL", "Arise_your_character_database")
+SPAWN_CHAT = os.getenv("SPAWN_CHAT", "https://t.me/+wO6jijXTj1VhNWQ1")
+SPAWN_CHAT_ID = None
+ARISE_DB_FILE = "arise_db.json"
+arise_character_db = []
+arise_autocatch_active = True
+account_rate_limited_until = {}
+processed_spawn_ids = set()
 
 # Account Configuration
 accounts = {
@@ -230,6 +244,222 @@ async def send_dynamic_reply(client, entity, target_msg, text):
     except Exception as e:
         logging.error(f"Failed to send dynamic reply: {e}")
 
+# ==========================================
+# ARISE AUTO-CATCHER MODULE
+# ==========================================
+
+def compute_dhash(image, hash_size=8):
+    """Computes difference hash (dHash) for fast visual comparison."""
+    try:
+        image = image.convert('L').resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+        pixels = list(image.getdata())
+        diff = []
+        for row in range(hash_size):
+            for col in range(hash_size):
+                left = pixels[row * (hash_size + 1) + col]
+                right = pixels[row * (hash_size + 1) + col + 1]
+                diff.append(left > right)
+        decimal_val = 0
+        for index, value in enumerate(diff):
+            if value:
+                decimal_val |= 1 << index
+        return hex(decimal_val)[2:].zfill(hash_size * hash_size // 4)
+    except Exception as e:
+        logging.error(f"Error computing dHash: {e}")
+        return None
+
+def hamming_distance(h1, h2):
+    """Calculates bit difference between two hex hashes."""
+    try:
+        val1 = int(h1, 16)
+        val2 = int(h2, 16)
+        return bin(val1 ^ val2).count('1')
+    except:
+        return 999
+
+def load_arise_db():
+    global arise_character_db
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(script_dir, ARISE_DB_FILE)
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                arise_character_db = json.load(f)
+            logging.info(f"Loaded {len(arise_character_db)} Arise characters from {ARISE_DB_FILE}.")
+        except Exception as e:
+            logging.error(f"Failed to load {ARISE_DB_FILE}: {e}")
+    else:
+        logging.info(f"{ARISE_DB_FILE} not found. Use /syncarise to scan the database channel.")
+
+def save_arise_db():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(script_dir, ARISE_DB_FILE)
+    try:
+        with open(db_path, "w", encoding="utf-8") as f:
+            json.dump(arise_character_db, f, ensure_ascii=False, indent=2)
+        logging.info(f"Saved {len(arise_character_db)} Arise characters to {ARISE_DB_FILE}.")
+    except Exception as e:
+        logging.error(f"Failed to save {ARISE_DB_FILE}: {e}")
+
+async def sync_arise_database(client, status_callback=None):
+    """Scans the Arise character database channel and builds arise_db.json."""
+    global arise_character_db
+    try:
+        logging.info(f"Scanning Arise database channel: {ARISE_DATABASE_CHANNEL}...")
+        entity = await client.get_entity(ARISE_DATABASE_CHANNEL)
+        existing_ids = {entry["id"] for entry in arise_character_db if "id" in entry}
+        
+        new_entries = []
+        scanned_count = 0
+        
+        async for msg in client.iter_messages(entity, limit=4000):
+            if not msg.photo or not msg.text:
+                continue
+                
+            match = re.search(r'\b(\d+):\s*([^\n\(\)]+)', msg.text)
+            if not match:
+                continue
+                
+            char_id = int(match.group(1))
+            char_name = match.group(2).strip()
+            
+            if char_id in existing_ids:
+                continue
+                
+            anime_match = re.search(r'Anime:\s*([^\n\[]+)', msg.text)
+            anime_name = anime_match.group(1).strip() if anime_match else ""
+            
+            photo_bytes = io.BytesIO()
+            await client.download_media(msg, file=photo_bytes, thumb=-1)
+            photo_bytes.seek(0)
+            
+            try:
+                img = Image.open(photo_bytes)
+                img_hash = compute_dhash(img)
+                if img_hash:
+                    entry = {
+                        "id": char_id,
+                        "name": char_name,
+                        "anime": anime_name,
+                        "hash": img_hash,
+                        "msg_id": msg.id
+                    }
+                    new_entries.append(entry)
+                    existing_ids.add(char_id)
+                    scanned_count += 1
+                    if scanned_count % 100 == 0:
+                        logging.info(f"[Arise Sync] Indexed {scanned_count} characters...")
+                        if status_callback:
+                            await status_callback(f"⏳ Indexed {scanned_count} characters...")
+            except Exception as e:
+                pass
+                
+        if new_entries:
+            arise_character_db.extend(new_entries)
+            save_arise_db()
+            logging.info(f"Database sync complete! Added {len(new_entries)} characters. Total: {len(arise_character_db)}")
+            return len(new_entries), len(arise_character_db)
+        else:
+            logging.info("Arise database is already up to date.")
+            return 0, len(arise_character_db)
+    except Exception as e:
+        logging.error(f"Error syncing Arise database: {e}")
+        return -1, len(arise_character_db)
+
+def find_best_character_match(image_bytes):
+    """Matches a spawn image against the indexed Arise database."""
+    if not arise_character_db:
+        return None, 999
+    try:
+        img = Image.open(image_bytes)
+        spawn_hash = compute_dhash(img)
+        if not spawn_hash:
+            return None, 999
+            
+        best_match = None
+        min_dist = 999
+        for entry in arise_character_db:
+            dist = hamming_distance(spawn_hash, entry["hash"])
+            if dist < min_dist:
+                min_dist = dist
+                best_match = entry
+                if dist == 0:
+                    break
+        return best_match, min_dist
+    except Exception as e:
+        logging.error(f"Error matching character: {e}")
+        return None, 999
+
+async def handle_spawn_message(event):
+    """Processes gate spawn messages and catches the character using Account 1 (with Acc 2/3 fallback)."""
+    global account_rate_limited_until, processed_spawn_ids
+    if not arise_autocatch_active:
+        return
+        
+    if event.id in processed_spawn_ids:
+        return
+    processed_spawn_ids.add(event.id)
+    if len(processed_spawn_ids) > 500:
+        processed_spawn_ids.pop()
+        
+    text = (event.raw_text or "").upper()
+    if "THE GATE WAS SPAWNED" not in text and "/ARISE" not in text:
+        return
+        
+    if not event.photo:
+        return
+        
+    logging.info(f"[Auto-Catcher] Gate spawn detected in chat {event.chat_id}! Identifying character...")
+    
+    photo_bytes = io.BytesIO()
+    try:
+        await event.download_media(file=photo_bytes, thumb=-1)
+        photo_bytes.seek(0)
+    except Exception as e:
+        logging.error(f"[Auto-Catcher] Failed to download spawn photo: {e}")
+        return
+        
+    best_match, dist = find_best_character_match(photo_bytes)
+    if not best_match or dist > 10:
+        logging.warning(f"[Auto-Catcher] No confident match found in database (min distance: {dist}).")
+        return
+        
+    char_name = best_match["name"]
+    logging.info(f"🎯 [Auto-Catcher] MATCH FOUND: '{char_name}' (distance: {dist}/64). Catching character...")
+    
+    # Natural reaction delay (1.2s to 2.0s)
+    await asyncio.sleep(random.uniform(1.2, 2.0))
+    
+    order = ["acc1", "acc2", "acc3"]
+    current_time = time.time()
+    
+    for acc_key in order:
+        if acc_key not in clients:
+            continue
+            
+        if account_rate_limited_until.get(acc_key, 0) > current_time:
+            cooldown_left = int(account_rate_limited_until[acc_key] - current_time)
+            logging.info(f"[Auto-Catcher] {clients[acc_key]['name']} is on cooldown ({cooldown_left}s remaining). Trying next account...")
+            continue
+            
+        catcher_client = clients[acc_key]["client"]
+        catcher_name = clients[acc_key]["name"]
+        
+        try:
+            catch_cmd = f"/arise {char_name}"
+            await catcher_client.send_message(event.chat_id, catch_cmd, reply_to=event.message.id)
+            logging.info(f"🏆 [Auto-Catcher] {catcher_name} SENT: {catch_cmd}")
+            return
+        except FloodWaitError as fe:
+            logging.warning(f"[Auto-Catcher] {catcher_name} got rate-limited for {fe.seconds}s! Failing over to next account...")
+            account_rate_limited_until[acc_key] = current_time + fe.seconds
+            continue
+        except Exception as e:
+            logging.error(f"[Auto-Catcher] {catcher_name} error sending catch command: {e}")
+            continue
+            
+    logging.error("[Auto-Catcher] All accounts were unable to catch the character!")
+
 def setup_commands(bot_client):
     @bot_client.on(events.NewMessage(pattern='(?i)^/stats(?:@genzetabot)?$'))
     async def stats_handler(event):
@@ -238,7 +468,47 @@ def setup_commands(bot_client):
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
                 del_str = format_seconds_to_readable(delete_delay)
-                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nMessages Sent: {total_messages_sent}")
+                catch_status = f"🟢 ONLINE ({len(arise_character_db)} chars)" if arise_autocatch_active else "🔴 OFFLINE"
+                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nAuto-Catch: {catch_status}\nMessages Sent: {total_messages_sent}")
+        except: pass
+
+    @bot_client.on(events.NewMessage(pattern='(?i)^/syncarise(?:@genzetabot)?$'))
+    async def syncarise_handler(event):
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                status_msg = await event.reply("🔄 Scanning @Arise_your_character_database for character cards... Please wait!")
+                async def update_status(text):
+                    try: await status_msg.edit(text)
+                    except: pass
+                if "acc1" in clients:
+                    new_added, total = await sync_arise_database(clients["acc1"]["client"], update_status)
+                    if new_added >= 0:
+                        await status_msg.edit(f"✅ **Arise Database Synced!**\n\nNew Characters Added: {new_added}\nTotal in Database: {total}")
+                    else:
+                        await status_msg.edit("❌ Failed to sync database! Check logs for details.")
+                else:
+                    await status_msg.edit("❌ Account 1 is not connected to perform the sync.")
+        except: pass
+
+    @bot_client.on(events.NewMessage(pattern='(?i)^/ariseon(?:@genzetabot)?$'))
+    async def ariseon_handler(event):
+        global arise_autocatch_active
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                arise_autocatch_active = True
+                await event.reply("✅ Arise Auto-Catcher is now **ONLINE**! Watching for gate spawns.")
+        except: pass
+
+    @bot_client.on(events.NewMessage(pattern='(?i)^/ariseoff(?:@genzetabot)?$'))
+    async def ariseoff_handler(event):
+        global arise_autocatch_active
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                arise_autocatch_active = False
+                await event.reply("🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
@@ -731,6 +1001,34 @@ async def main():
             
     # Launch 15-minute periodic sweeper for long intervals (e.g. 4 days)
     asyncio.create_task(periodic_history_sweeper())
+    
+    # Initialize Arise Character Database & Auto-Catcher
+    load_arise_db()
+    if not arise_character_db and "acc1" in clients:
+        logging.info("Arise database empty on boot. Starting background sync from @Arise_your_character_database...")
+        asyncio.create_task(sync_arise_database(clients["acc1"]["client"]))
+        
+    global SPAWN_CHAT_ID
+    if "acc1" in clients and SPAWN_CHAT:
+        try:
+            spawn_ent = await clients["acc1"]["client"].get_entity(SPAWN_CHAT)
+            SPAWN_CHAT_ID = utils.get_peer_id(spawn_ent)
+            logging.info(f"Resolved SPAWN_CHAT to ID: {SPAWN_CHAT_ID}")
+        except Exception as e:
+            logging.warning(f"Could not resolve SPAWN_CHAT ({e}). Auto-catcher will detect spawns by gate content.")
+            
+    # Register Arise Gate spawn listener
+    for key in ["acc1", "acc2", "acc3"]:
+        if key in clients:
+            c_client = clients[key]["client"]
+            @c_client.on(events.NewMessage())
+            async def spawn_watcher(event):
+                if not event.is_group and not event.is_channel:
+                    return
+                if SPAWN_CHAT_ID and isinstance(SPAWN_CHAT_ID, int) and event.chat_id != SPAWN_CHAT_ID:
+                    return
+                await handle_spawn_message(event)
+    logging.info("Arise Auto-Catcher listener registered for gate spawns.")
     
     await chat_loop()
     
