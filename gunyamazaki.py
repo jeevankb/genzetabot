@@ -1179,21 +1179,7 @@ async def main():
 
                 await handle_spawn_message(event)
     logging.info(f"Arise Auto-Catcher listener registered! Locked to: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
-    
-    # 1. Start dummy web server for Render health checks FIRST!
-    from aiohttp import web
-    async def handle(request):
-        return web.Response(text="GunYamazaki Bot is running!")
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logging.info(f"Dummy Web Server started on port {port} for Render.")
-
-    # 2. Run conversation loop as a background task!
+    # Run conversation loop as a background task!
     asyncio.create_task(chat_loop())
     
     # 3. Keep all account connections alive
