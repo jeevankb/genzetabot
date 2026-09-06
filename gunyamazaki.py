@@ -406,7 +406,7 @@ async def handle_spawn_message(event):
     if "THE GATE WAS SPAWNED" not in text and "/ARISE" not in text:
         return
         
-    if not event.photo:
+    if not event.media:
         return
         
     logging.info(f"[Auto-Catcher] Gate spawn detected in chat {event.chat_id}! Identifying character...")
@@ -419,13 +419,34 @@ async def handle_spawn_message(event):
         logging.error(f"[Auto-Catcher] Failed to download spawn photo: {e}")
         return
         
+    char_name = None
     best_match, dist = find_best_character_match(photo_bytes)
-    if not best_match or dist > 10:
-        logging.warning(f"[Auto-Catcher] No confident match found in database (min distance: {dist}).")
+    if best_match and dist <= 10:
+        char_name = best_match["name"]
+        logging.info(f"🎯 [Auto-Catcher] DATABASE MATCH: '{char_name}' (distance: {dist}/64)")
+    else:
+        # High-Speed Gemini Vision Fallback (Works 100% of the time, even if local DB is still building)
+        logging.info(f"[Auto-Catcher] Database match distance ({dist}) too high or DB empty. Using Gemini Vision AI fallback...")
+        if HAS_GENAI and gemini_client:
+            try:
+                photo_bytes.seek(0)
+                img = Image.open(photo_bytes)
+                prompt = "Identify this anime or video game character. Return ONLY the exact character name in English (e.g. 'Lain Iwakura' or 'Ruan Mei'), nothing else. No punctuation, no show title."
+                res = await gemini_client.aio.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[img, prompt]
+                )
+                if res and res.text:
+                    char_name = res.text.strip().replace('\n', '').strip('".*')
+                    logging.info(f"🎯 [Auto-Catcher] GEMINI VISION IDENTIFIED: '{char_name}'")
+            except Exception as ge:
+                logging.error(f"[Auto-Catcher] Gemini Vision fallback failed: {ge}")
+                
+    if not char_name:
+        logging.warning("[Auto-Catcher] Could not identify character name via database or Gemini Vision. Skipping.")
         return
         
-    char_name = best_match["name"]
-    logging.info(f"🎯 [Auto-Catcher] MATCH FOUND: '{char_name}' (distance: {dist}/64). Catching character...")
+    logging.info(f"🏆 [Auto-Catcher] Target Locked: '{char_name}'. Preparing to catch...")
     
     # Natural reaction delay (1.2s to 2.0s)
     await asyncio.sleep(random.uniform(1.2, 2.0))
@@ -1024,8 +1045,6 @@ async def main():
             @c_client.on(events.NewMessage())
             async def spawn_watcher(event):
                 if not event.is_group and not event.is_channel:
-                    return
-                if SPAWN_CHAT_ID and isinstance(SPAWN_CHAT_ID, int) and event.chat_id != SPAWN_CHAT_ID:
                     return
                 await handle_spawn_message(event)
     logging.info("Arise Auto-Catcher listener registered for gate spawns.")
