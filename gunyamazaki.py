@@ -100,12 +100,45 @@ async def save_state_to_telegram(csv_idx):
     except Exception as e:
         logging.error(f"Failed to save state to telegram: {e}")
 
+def format_seconds_to_readable(seconds):
+    if seconds <= 0:
+        return "Disabled (0s)"
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    if days > 0: parts.append(f"{days}d")
+    if hours > 0: parts.append(f"{hours}h")
+    if minutes > 0: parts.append(f"{minutes}m")
+    if secs > 0 or not parts: parts.append(f"{secs}s")
+    return " ".join(parts)
+
 def parse_time_to_seconds(time_str):
-    time_str = time_str.lower().strip()
+    if not time_str: return None
+    time_str = time_str.lower().strip().replace(" ", "")
     try:
-        if time_str.endswith('s'): return int(time_str[:-1])
-        elif time_str.endswith('m'): return int(time_str[:-1]) * 60
-        elif time_str.endswith('h'): return int(time_str[:-1]) * 3600
+        # Check weeks
+        if time_str.endswith(('weeks', 'week', 'w')):
+            val = time_str.rstrip('weeks').rstrip('week').rstrip('w')
+            return int(val) * 604800
+        # Check days (e.g. 4days, 4day, 4d)
+        elif time_str.endswith(('days', 'day', 'd')):
+            val = time_str.rstrip('days').rstrip('day').rstrip('d')
+            return int(val) * 86400
+        # Check hours (e.g. 12hours, 12hour, 12h)
+        elif time_str.endswith(('hours', 'hour', 'h')):
+            val = time_str.rstrip('hours').rstrip('hour').rstrip('h')
+            return int(val) * 3600
+        # Check minutes (e.g. 15mins, 15min, 15m)
+        elif time_str.endswith(('mins', 'min', 'm')):
+            val = time_str.rstrip('mins').rstrip('min').rstrip('m')
+            return int(val) * 60
+        # Check seconds (e.g. 30secs, 30sec, 30s)
+        elif time_str.endswith(('secs', 'sec', 's')):
+            val = time_str.rstrip('secs').rstrip('sec').rstrip('s')
+            return int(val)
         return int(time_str)
     except:
         return None
@@ -159,6 +192,20 @@ async def history_sweeper(client, chat_entity, delay_seconds):
     except Exception as e:
         logging.error(f"Error in history sweeper: {e}")
 
+async def periodic_history_sweeper():
+    while True:
+        await asyncio.sleep(900)  # Run sweep every 15 minutes
+        try:
+            if "acc1" in clients and delete_delay > 0:
+                acc1_client = clients["acc1"]["client"]
+                target = TARGET_CHAT_ID or TARGET_CHAT
+                if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
+                    target = int(target)
+                entity = await acc1_client.get_entity(target)
+                await history_sweeper(acc1_client, entity, delete_delay)
+        except Exception as e:
+            logging.error(f"Periodic sweeper error: {e}")
+
 async def simulate_typing(client, entity, text):
     if message_speed < 3:
         await asyncio.sleep(message_speed)
@@ -190,7 +237,8 @@ def setup_commands(bot_client):
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
-                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {delete_delay}s\nMessages Sent: {total_messages_sent}")
+                del_str = format_seconds_to_readable(delete_delay)
+                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nMessages Sent: {total_messages_sent}")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
@@ -236,15 +284,22 @@ def setup_commands(bot_client):
         try:
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
-                del_val = parse_time_to_seconds(event.pattern_match.group(1))
+                raw_val = event.pattern_match.group(1).strip()
+                del_val = parse_time_to_seconds(raw_val)
                 if del_val is not None:
                     delete_delay = del_val
-                    await event.reply(f"🗑 Auto-delete set to {delete_delay} seconds. Starting sweep...")
+                    readable = format_seconds_to_readable(delete_delay)
+                    await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s). Starting sweep...")
                     try:
                         acc1_client = clients["acc1"]["client"]
-                        entity = await acc1_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                        target = TARGET_CHAT_ID or TARGET_CHAT
+                        if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
+                            target = int(target)
+                        entity = await acc1_client.get_entity(target)
                         asyncio.create_task(history_sweeper(acc1_client, entity, delete_delay))
                     except: pass
+                else:
+                    await event.reply("❌ Invalid time format! You can use: `/setdelete 4days`, `/setdelete 12h`, `/setdelete 15m`, `/setdelete 30s`, or `/setdelete 0`.")
         except: pass
 
     @bot_client.on(events.NewMessage())
@@ -666,10 +721,16 @@ async def main():
     # Auto-start history sweeper on boot using Account 1
     if "acc1" in clients and delete_delay > 0:
         try:
-            entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            target = TARGET_CHAT_ID or TARGET_CHAT
+            if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
+                target = int(target)
+            entity = await clients["acc1"]["client"].get_entity(target)
             asyncio.create_task(history_sweeper(clients["acc1"]["client"], entity, delete_delay))
         except Exception as e:
             logging.error(f"Auto-sweeper start failed: {e}")
+            
+    # Launch 15-minute periodic sweeper for long intervals (e.g. 4 days)
+    asyncio.create_task(periodic_history_sweeper())
     
     await chat_loop()
     
