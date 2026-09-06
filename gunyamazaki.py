@@ -37,7 +37,7 @@ if HAS_GENAI and not gemini_client:
 
 # Data loading
 CSV_FILE = "anime_group_chat_10000.csv"
-TARGET_CHAT = "https://t.me/+1tWK4j-BYC85MDVl"
+TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
 TARGET_CHAT_ID = None
 conversation_data = []
 
@@ -195,15 +195,16 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
-        global bot_active, BOT_ENTITY
+        global bot_active, BOT_ENTITY, TARGET_CHAT_ID
         BOT_ENTITY = event.input_chat
+        TARGET_CHAT_ID = event.chat_id
         # Only allow Account 1 to use this command
         try:
             sender = await event.get_sender()
             if sender and sender.id == accounts["acc1"]["user_id"]:
                 bot_active = True
-                await event.reply("✅ GunYamazaki System Locked On. Starting conversation loop...")
-                logging.info("System LOCKED ON by admin.")
+                await event.reply(f"✅ GunYamazaki System Locked On to chat {TARGET_CHAT_ID}. Starting conversation loop...")
+                logging.info(f"System LOCKED ON to {TARGET_CHAT_ID} by admin.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff(?:@genzetabot)?$'))
@@ -246,9 +247,13 @@ def setup_commands(bot_client):
                     except: pass
         except: pass
 
-    @bot_client.on(events.NewMessage(chats=TARGET_CHAT_ID or TARGET_CHAT))
+    @bot_client.on(events.NewMessage())
     async def auto_delete_handler(event):
         global BOT_ENTITY
+        if not event.is_group and not event.is_channel:
+            return
+        if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
+            return
         BOT_ENTITY = event.input_chat
         if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/setspeed")):
             return
@@ -612,25 +617,47 @@ async def main():
     TARGET_INPUT_PEER = None
     if "acc1" in clients:
         try:
-            entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
+            if isinstance(TARGET_CHAT, str) and (TARGET_CHAT.startswith("-100") or TARGET_CHAT.lstrip('-').isdigit()):
+                entity = await clients["acc1"]["client"].get_entity(int(TARGET_CHAT))
+            else:
+                entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
             TARGET_CHAT_ID = utils.get_peer_id(entity)
             if hasattr(entity, 'access_hash'):
                 from telethon.tl.types import InputPeerChannel
                 TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
             logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
         except Exception as e:
-            logging.error(f"Failed to resolve TARGET_CHAT: {e}")
-            TARGET_CHAT_ID = TARGET_CHAT
+            logging.warning(f"Could not resolve TARGET_CHAT via link ({e}). Searching dialogs for group...")
+            try:
+                dialogs = await clients["acc1"]["client"].get_dialogs(limit=50)
+                for d in dialogs:
+                    if d.is_group or d.is_channel:
+                        title = (d.title or "").lower()
+                        if any(term in title for term in ["mafia", "tarot", "anime", "limited", "club"]) or not TARGET_CHAT_ID:
+                            TARGET_CHAT_ID = d.id
+                            if hasattr(d.entity, 'access_hash'):
+                                from telethon.tl.types import InputPeerChannel
+                                TARGET_INPUT_PEER = InputPeerChannel(d.entity.id, d.entity.access_hash)
+                            logging.info(f"Auto-discovered active group from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                            if any(term in title for term in ["mafia", "tarot", "anime", "limited", "club"]):
+                                break
+            except Exception as dialog_err:
+                logging.error(f"Dialog fallback search failed: {dialog_err}")
+                TARGET_CHAT_ID = None
 
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
         
-    # Warm up human accounts entity cache directly using the join link
+    # Warm up human accounts entity cache safely
     for key, c in clients.items():
         if key != "acc4":
             try:
-                await c["client"].get_entity(TARGET_CHAT)
-                logging.info(f"Warmed up entity cache directly for {c['name']}")
+                await c["client"].get_dialogs(limit=30)
+                if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int):
+                    try:
+                        await c["client"].get_entity(TARGET_CHAT_ID)
+                    except: pass
+                logging.info(f"Warmed up entity cache for {c['name']}")
             except Exception as e:
                 logging.error(f"Failed to warm up cache for {c['name']}: {e}")
         
