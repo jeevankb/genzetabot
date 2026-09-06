@@ -83,33 +83,44 @@ def load_csv():
 # Global state
 bot_active = False
 message_speed = 15
-delete_delay = 900  # Default 15 minutes
+delete_delay = int(os.getenv("DELETE_DELAY", 604800))  # Default 7 days (604,800s)
 total_messages_sent = 0
 clients = {}
 STATE_MSG_ID = None
-
-
+current_csv_index = 0
 
 async def load_state_from_telegram():
-    global STATE_MSG_ID
+    global STATE_MSG_ID, current_csv_index, delete_delay, message_speed
     try:
         acc1 = clients["acc1"]["client"]
         async for msg in acc1.iter_messages("me", search="[GunYamazaki State]"):
             if "[GunYamazaki State]" in msg.text:
                 STATE_MSG_ID = msg.id
                 try:
-                    return int(msg.text.split("csv_index=")[1])
+                    parts = msg.text.split()
+                    for p in parts:
+                        if p.startswith("csv_index="):
+                            current_csv_index = int(p.split("=")[1])
+                        elif p.startswith("delete_delay="):
+                            delete_delay = int(p.split("=")[1])
+                            logging.info(f"Restored delete_delay from Telegram: {delete_delay}s ({format_seconds_to_readable(delete_delay)})")
+                        elif p.startswith("message_speed="):
+                            message_speed = int(p.split("=")[1])
+                            logging.info(f"Restored message_speed from Telegram: {message_speed}s")
+                    return current_csv_index
                 except: pass
                 break
     except Exception as e:
         logging.error(f"Failed to load state from telegram: {e}")
     return 0
 
-async def save_state_to_telegram(csv_idx):
-    global STATE_MSG_ID
+async def save_state_to_telegram(csv_idx=None):
+    global STATE_MSG_ID, current_csv_index
+    if csv_idx is not None:
+        current_csv_index = csv_idx
     try:
         acc1 = clients["acc1"]["client"]
-        text = f"[GunYamazaki State] csv_index={csv_idx}"
+        text = f"[GunYamazaki State] csv_index={current_csv_index} delete_delay={delete_delay} message_speed={message_speed}"
         if STATE_MSG_ID:
             await acc1.edit_message("me", STATE_MSG_ID, text)
         else:
@@ -351,8 +362,9 @@ async def sync_arise_database(client, status_callback=None):
                     new_entries.append(entry)
                     existing_ids.add(char_id)
                     scanned_count += 1
-                    if scanned_count % 100 == 0:
+                    if scanned_count % 50 == 0:
                         logging.info(f"[Arise Sync] Indexed {scanned_count} characters...")
+                        save_arise_db()
                         if status_callback:
                             await status_callback(f"⏳ Indexed {scanned_count} characters...")
             except Exception as e:
@@ -362,6 +374,16 @@ async def sync_arise_database(client, status_callback=None):
             arise_character_db.extend(new_entries)
             save_arise_db()
             logging.info(f"Database sync complete! Added {len(new_entries)} characters. Total: {len(arise_character_db)}")
+            try:
+                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ARISE_DB_FILE)
+                await client.send_message(
+                    "me",
+                    f"📁 **Arise Database Built!** ({len(arise_character_db)} characters)\nDownload this file and add it to your GitHub repository for instant zero-delay auto-catching!",
+                    file=db_path
+                )
+                logging.info("Sent arise_db.json to Account 1 Saved Messages!")
+            except Exception as se:
+                logging.warning(f"Could not send arise_db.json to Saved Messages: {se}")
             return len(new_entries), len(arise_character_db)
         else:
             logging.info("Arise database is already up to date.")
@@ -612,6 +634,25 @@ def setup_commands(bot_client):
                 logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
         except: pass
 
+    @bot_client.on(events.NewMessage(pattern='(?i)^/(?:exportarise|getdb|sendarise)(?:@genzetabot)?$'))
+    async def exportarise_handler(event):
+        try:
+            sender = await event.get_sender()
+            if sender and sender.id == accounts["acc1"]["user_id"]:
+                db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ARISE_DB_FILE)
+                if os.path.exists(db_path) and len(arise_character_db) > 0:
+                    await event.reply(
+                        f"📦 **Arise Character Database Export**\n\n"
+                        f"Characters Indexed: **{len(arise_character_db)}**\n"
+                        f"File Size: **{os.path.getsize(db_path) // 1024} KB**\n\n"
+                        f"Save this `arise_db.json` into your GitHub repository for instant zero-delay auto-catching!",
+                        file=db_path
+                    )
+                else:
+                    await event.reply(f"⏳ Database currently has {len(arise_character_db)} characters and is still indexing. Please wait a bit or use `/syncarise`!")
+        except Exception as e:
+            await event.reply(f"Error sending database: {e}")
+
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         global bot_active, BOT_ENTITY, TARGET_CHAT_ID, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
@@ -656,7 +697,8 @@ def setup_commands(bot_client):
                 speed_val = parse_time_to_seconds(event.pattern_match.group(1))
                 if speed_val is not None:
                     message_speed = speed_val
-                    await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds.")
+                    await save_state_to_telegram()
+                    await event.reply(f"⚡ Speed set to 1 message every {message_speed} seconds. (Saved)")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/setdelete(?:@genzetabot)?\\s+(.+)'))
@@ -670,6 +712,7 @@ def setup_commands(bot_client):
                 if del_val is not None:
                     delete_delay = del_val
                     readable = format_seconds_to_readable(delete_delay)
+                    await save_state_to_telegram()
                     await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s). Starting sweep...")
                     try:
                         acc1_client = clients["acc1"]["client"]
@@ -680,7 +723,7 @@ def setup_commands(bot_client):
                         asyncio.create_task(history_sweeper(acc1_client, entity, delete_delay))
                     except: pass
                 else:
-                    await event.reply("❌ Invalid time format! You can use: `/setdelete 4days`, `/setdelete 12h`, `/setdelete 15m`, `/setdelete 30s`, or `/setdelete 0`.")
+                    await event.reply("❌ Invalid time format! You can use: `/setdelete 7days`, `/setdelete 4d`, `/setdelete 12h`, `/setdelete 15m`, `/setdelete 30s`, or `/setdelete 0`.")
         except: pass
 
     @bot_client.on(events.NewMessage())
