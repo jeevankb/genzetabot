@@ -230,11 +230,10 @@ async def periodic_history_sweeper():
             logging.error(f"Periodic sweeper error: {e}")
 
 async def simulate_typing(client, entity, text):
-    if message_speed < 3:
-        await asyncio.sleep(message_speed)
+    if message_speed <= 1:
         return
-        
-    typing_time = min(max(len(text) * 0.05, 1.0), 8.0)
+    max_type = min(max(message_speed * 0.3, 0.5), 3.0)
+    typing_time = min(max(len(text) * 0.03, 0.5), max_type)
     try:
         async with client.action(entity, 'typing'):
             await asyncio.sleep(typing_time)
@@ -500,7 +499,7 @@ def setup_commands(bot_client):
                     await event.reply(
                         f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
                         f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
-                        f"To change, send: `/setspeed 15s`, `/setspeed 10s`, or `/setspeed 30s`."
+                        f"To change, send: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 15s`, or `/setspeed 30s`."
                     )
                     return
                 speed_val = parse_time_to_seconds(arg.strip())
@@ -512,7 +511,7 @@ def setup_commands(bot_client):
                         f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
                     )
                 else:
-                    await event.reply("❌ Invalid speed! Example: `/setspeed 15s` or `/setspeed 30s`.")
+                    await event.reply("❌ Invalid speed! Example: `/setspeed 5s`, `/setspeed 10s`, or `/setspeed 15s`.")
         except Exception as e:
             logging.error(f"Error in setspeed_handler: {e}")
 
@@ -1030,7 +1029,7 @@ async def main():
                         await event.reply(
                             f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
                             f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
-                            f"To change, send: `/setspeed 15s`, `/setspeed 10s`, or `/setspeed 30s`."
+                            f"To change, send: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 15s`, or `/setspeed 30s`."
                         )
                         return
                     speed_val = parse_time_to_seconds(arg.strip())
@@ -1042,7 +1041,7 @@ async def main():
                             f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
                         )
                     else:
-                        await event.reply("❌ Invalid speed! Example: `/setspeed 15s` or `/setspeed 30s`.")
+                        await event.reply("❌ Invalid speed! Example: `/setspeed 5s`, `/setspeed 10s`, or `/setspeed 15s`.")
             except Exception as e:
                 logging.error(f"Error in acc1_saved_setspeed: {e}")
 
