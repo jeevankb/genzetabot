@@ -83,6 +83,7 @@ message_speed = 15
 delete_delay = int(os.getenv("DELETE_DELAY", 900))  # Default 15 minutes (changeable anytime by User 1 via /setdelete)
 total_messages_sent = 0
 clients = {}
+OUR_USER_IDS = {5429173364}
 STATE_MSG_ID = None
 current_csv_index = 0
 
@@ -572,63 +573,61 @@ def setup_commands(bot_client):
             return
             
         try:
-            sender = await event.get_sender()
-            if not sender: return
+            sender_id = event.sender_id
+            if not sender_id: return
             
-            our_ids = []
-            for acc_data in clients.values():
-                our_ids.append((await acc_data["client"].get_me()).id)
-                
-            # If a bot speaks
-            if sender.id in our_ids:
+            # If one of our bots/accounts speaks
+            if sender_id in OUR_USER_IDS:
                 if random.random() < 0.15:
                     try:
                         emoji = random.choice(["👍", "😂", "❤️", "🔥", "🤔", "👀", "👌", "✨"])
-                        reactor_acc = random.choice([c for k, c in clients.items() if k != "acc4" and (await c["client"].get_me()).id != sender.id])
-                        entity = await bot_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                        await reactor_acc["client"](SendReactionRequest(
-                            peer=entity,
-                            msg_id=event.message.id,
-                            reaction=[ReactionEmoji(emoticon=emoji)]
-                        ))
+                        reactors = [c for k, c in clients.items() if k != "acc4" and c.get("user_id") != sender_id]
+                        if reactors:
+                            reactor_acc = random.choice(reactors)
+                            await reactor_acc["client"](SendReactionRequest(
+                                peer=event.input_chat,
+                                msg_id=event.message.id,
+                                reaction=[ReactionEmoji(emoticon=emoji)]
+                            ))
                     except: pass
                 return
                 
             # If a human speaks
-            if sender.id not in our_ids:
-                if delete_delay > 0:
-                    asyncio.create_task(delete_other_message(event.message, delete_delay))
-                    
-                msg_text = event.raw_text.lower() if event.raw_text else ""
-                if not msg_text: return
+            if delete_delay > 0:
+                asyncio.create_task(delete_other_message(event.message, delete_delay))
                 
-                entity = await bot_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            msg_text = event.raw_text.lower() if event.raw_text else ""
+            if not msg_text: return
+            
+            entity = event.input_chat
 
-                # Emoji Reaction (20% chance)
-                if random.random() < 0.2:
-                    emoji = "👍"
-                    if any(word in msg_text for word in ["lol", "lmao", "haha", "funny"]): emoji = "😂"
-                    elif any(word in msg_text for word in ["love", "amazing", "best", "great", "cute"]): emoji = "❤️"
-                    elif any(word in msg_text for word in ["fire", "insane", "crazy", "wow"]): emoji = "🔥"
-                    elif any(word in msg_text for word in ["sad", "cry", "rip", "bad"]): emoji = "😢"
-                    
-                    try:
-                        reactor_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
+            # Emoji Reaction (20% chance)
+            if random.random() < 0.2:
+                emoji = "👍"
+                if any(word in msg_text for word in ["lol", "lmao", "haha", "funny"]): emoji = "😂"
+                elif any(word in msg_text for word in ["love", "amazing", "best", "great", "cute"]): emoji = "❤️"
+                elif any(word in msg_text for word in ["fire", "insane", "crazy", "wow"]): emoji = "🔥"
+                elif any(word in msg_text for word in ["sad", "cry", "rip", "bad"]): emoji = "😢"
+                
+                try:
+                    reactors = [c for k, c in clients.items() if k != "acc4"]
+                    if reactors:
+                        reactor_acc = random.choice(reactors)
                         await reactor_acc["client"](SendReactionRequest(
                             peer=entity,
                             msg_id=event.message.id,
                             reaction=[ReactionEmoji(emoticon=emoji)]
                         ))
-                    except: pass
-                        
-                # AI Reply to Human
-                is_reply_to_bot = False
-                if event.message.is_reply:
-                    try:
-                        reply_msg = await event.message.get_reply_message()
-                        if reply_msg and reply_msg.sender_id in our_ids:
-                            is_reply_to_bot = True
-                    except: pass
+                except: pass
+                    
+            # AI Reply to Human
+            is_reply_to_bot = False
+            if event.message.is_reply:
+                try:
+                    reply_msg = await event.message.get_reply_message()
+                    if reply_msg and reply_msg.sender_id in OUR_USER_IDS:
+                        is_reply_to_bot = True
+                except: pass
                         
                 if is_reply_to_bot and HAS_GENAI:
                     try:
@@ -923,15 +922,29 @@ async def main():
                 if session_str:
                     client = TelegramClient(StringSession(session_str), api_id, api_hash)
                     await client.start()
-                    clients[key] = {"client": client, "name": cfg["name"]}
-                    logging.info(f"Connected {cfg['name']} via Session String.")
+                    try:
+                        me = await client.get_me()
+                        uid = me.id if me else cfg.get("user_id")
+                    except Exception:
+                        uid = cfg.get("user_id")
+                    if uid:
+                        OUR_USER_IDS.add(uid)
+                    clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
+                    logging.info(f"Connected {cfg['name']} (ID: {uid}) via Session String.")
                     connected = True
                     break
                 elif bot_token and key == "acc4":
                     client = TelegramClient(StringSession(), api_id, api_hash)
                     await client.start(bot_token=bot_token)
-                    clients[key] = {"client": client, "name": cfg["name"]}
-                    logging.info(f"Connected {cfg['name']} via Bot Token.")
+                    try:
+                        me = await client.get_me()
+                        uid = me.id if me else None
+                    except Exception:
+                        uid = None
+                    if uid:
+                        OUR_USER_IDS.add(uid)
+                    clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
+                    logging.info(f"Connected {cfg['name']} (ID: {uid}) via Bot Token.")
                     connected = True
                     break
             except FloodWaitError as e:
