@@ -396,11 +396,30 @@ async def handle_spawn_message(event):
     logging.error("[Auto-Catcher] All accounts were unable to catch the character!")
 
 def setup_commands(bot_client):
+    is_acc4 = (bot_client == clients.get("acc4", {}).get("client"))
+
+    def should_skip():
+        # If registered on Account 1 fallback, but Account 4 is connected, yield to Account 4
+        return not is_acc4 and "acc4" in clients
+
+    def is_admin(event):
+        try:
+            s_id = getattr(event, 'sender_id', None)
+            if not s_id:
+                s = getattr(event, 'message', None)
+                s_id = getattr(getattr(s, 'from_id', None), 'user_id', None)
+            if s_id == accounts["acc1"]["user_id"]:
+                return True
+            if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me"):
+                return True
+        except: pass
+        return False
+
     @bot_client.on(events.NewMessage(pattern='(?i)^/stats(?:@genzetabot)?$'))
     async def stats_handler(event):
+        if should_skip(): return
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
                 del_str = format_seconds_to_readable(delete_delay)
                 catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
@@ -410,30 +429,30 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/ariseon(?:@genzetabot)?$'))
     async def ariseon_handler(event):
+        if should_skip(): return
         global arise_autocatch_active
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 arise_autocatch_active = True
                 await event.reply(f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/ariseoff(?:@genzetabot)?$'))
     async def ariseoff_handler(event):
+        if should_skip(): return
         global arise_autocatch_active
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 arise_autocatch_active = False
                 await event.reply("🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/(?:arisehere|lockarise)(?:@genzetabot)?$'))
     async def arisehere_handler(event):
+        if should_skip(): return
         global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE, arise_autocatch_active
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 SPAWN_CHAT_ID = event.chat_id
                 arise_autocatch_active = True
                 try:
@@ -451,18 +470,17 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
+        if should_skip(): return
         global bot_active, BOT_ENTITY, TARGET_CHAT_ID, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
-        BOT_ENTITY = event.input_chat
-        TARGET_CHAT_ID = event.chat_id
-        SPAWN_CHAT_ID = event.chat_id
         try:
-            chat = await event.get_chat()
-            SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
-        except: pass
-        # Only allow Account 1 to use this command
-        try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
+                BOT_ENTITY = event.input_chat
+                TARGET_CHAT_ID = event.chat_id
+                SPAWN_CHAT_ID = event.chat_id
+                try:
+                    chat = await event.get_chat()
+                    SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
+                except: pass
                 bot_active = True
                 await event.reply(
                     f"✅ **GunYamazaki System & Auto-Catcher LOCKED ON!**\n\n"
@@ -475,10 +493,10 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff(?:@genzetabot)?$'))
     async def lockoff_handler(event):
+        if should_skip(): return
         global bot_active
         try:
-            sender = await event.get_sender()
-            if sender and sender.id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 bot_active = False
                 await event.reply("🛑 GunYamazaki System Locked Off. Stopping conversation loop...")
                 logging.info("System LOCKED OFF by admin.")
@@ -486,15 +504,11 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
+        if should_skip(): return
+        if not is_acc4 and event.is_private: return
         global message_speed
         try:
-            sender_id = event.sender_id
-            if not sender_id:
-                try:
-                    s = await event.get_sender()
-                    sender_id = getattr(s, 'id', None)
-                except: pass
-            if sender_id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 arg = event.pattern_match.group(1)
                 if not arg or not arg.strip():
                     await event.reply(
@@ -518,15 +532,11 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setdelete_handler(event):
+        if should_skip(): return
+        if not is_acc4 and event.is_private: return
         global delete_delay
         try:
-            sender_id = event.sender_id
-            if not sender_id:
-                try:
-                    s = await event.get_sender()
-                    sender_id = getattr(s, 'id', None)
-                except: pass
-            if sender_id == accounts["acc1"]["user_id"]:
+            if is_admin(event):
                 arg = event.pattern_match.group(1)
                 if not arg or not arg.strip():
                     readable = format_seconds_to_readable(delete_delay)
@@ -549,12 +559,12 @@ def setup_commands(bot_client):
                     await save_state_to_telegram()
                     await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by User 1! Starting sweep...")
                     try:
-                        acc1_client = clients["acc1"]["client"]
+                        sweep_client = bot_client if bot_client.is_connected() else clients.get("acc1", {}).get("client")
                         target = TARGET_CHAT_ID or TARGET_CHAT
                         if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
                             target = int(target)
-                        entity = await acc1_client.get_entity(target)
-                        asyncio.create_task(history_sweeper(acc1_client, entity, delete_delay))
+                        entity = await sweep_client.get_entity(target)
+                        asyncio.create_task(history_sweeper(sweep_client, entity, delete_delay))
                     except: pass
                 else:
                     await event.reply("❌ Invalid time format! You can use: `/setdelete 15m`, `/setdelete 1h`, `/setdelete 1d`, `/setdelete 7days`, `/setdelete 30s`, or `/setdelete 0`.")
@@ -563,6 +573,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage())
     async def auto_delete_handler(event):
+        if should_skip(): return
         global BOT_ENTITY
         if not event.is_group and not event.is_channel:
             return
@@ -901,6 +912,52 @@ async def dummy_server():
     except Exception as e:
         logging.error(f"Failed to start web server: {e}")
 
+async def background_reconnect_account(key, cfg, wait_seconds):
+    try:
+        logging.info(f"⏳ [{cfg['name']}] Background reconnect task waiting {wait_seconds}s before attempting login...")
+        await asyncio.sleep(wait_seconds + 2)
+        bot_token = cfg.get("bot_token")
+        session_str = cfg.get("session")
+        api_id = cfg["api_id"]
+        api_hash = cfg["api_hash"]
+        client = None
+        for attempt in range(1, 6):
+            try:
+                if session_str:
+                    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                    await client.start()
+                elif bot_token and key == "acc4":
+                    client = TelegramClient(StringSession(), api_id, api_hash)
+                    await client.start(bot_token=bot_token)
+                break
+            except FloodWaitError as fe:
+                logging.warning(f"[{cfg['name']}] Still rate limited, waiting {fe.seconds}s...")
+                await asyncio.sleep(fe.seconds + 2)
+            except Exception as ce:
+                logging.warning(f"[{cfg['name']}] Reconnect attempt {attempt} failed: {ce}. Retrying in 10s...")
+                await asyncio.sleep(10)
+
+        if not client or not client.is_connected():
+            logging.error(f"[{cfg['name']}] Background reconnect failed to establish connection.")
+            return
+
+        try:
+            me = await client.get_me()
+            uid = me.id if me else cfg.get("user_id")
+        except Exception:
+            uid = cfg.get("user_id")
+            
+        if uid:
+            OUR_USER_IDS.add(uid)
+            
+        clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
+        logging.info(f"🎉 [{cfg['name']}] Background reconnect successful! Account is now ONLINE.")
+        if key == "acc4":
+            setup_commands(client)
+        asyncio.create_task(client.run_until_disconnected())
+    except Exception as e:
+        logging.error(f"[{cfg['name']}] Background reconnect failed: {e}")
+
 async def main():
     load_csv()
     
@@ -948,14 +1005,19 @@ async def main():
                     connected = True
                     break
             except FloodWaitError as e:
-                logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds}s before logging in. Sleeping...")
-                await asyncio.sleep(e.seconds + 2)
+                if e.seconds > 60:
+                    logging.warning(f"⚠️ Telegram Rate Limit! {cfg['name']} has FloodWait of {e.seconds}s (~{e.seconds // 60}m). Launching background reconnect so startup is NOT blocked!")
+                    asyncio.create_task(background_reconnect_account(key, cfg, e.seconds))
+                    break
+                else:
+                    logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds}s before logging in. Sleeping...")
+                    await asyncio.sleep(e.seconds + 2)
             except Exception as e:
                 logging.warning(f"[{cfg['name']}] Connection attempt {attempt}/5 failed ({e}). Telegram servers may have temporary issues. Retrying in 5 seconds...")
                 await asyncio.sleep(5)
                 
-        if not connected:
-            logging.error(f"Failed to connect {cfg['name']} after 5 attempts. Continuing with other accounts.")
+        if not connected and not any(k == key for k in clients):
+            logging.error(f"[{cfg['name']}] Skipped or queued in background. Continuing startup with other accounts.")
             
     global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY
     BOT_ENTITY = None
@@ -992,6 +1054,9 @@ async def main():
 
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
+    elif "acc1" in clients:
+        logging.info("Account 4 is connecting in background. Registering admin commands & auto-delete on Account 1 as fallback.")
+        setup_commands(clients["acc1"]["client"])
         
     if "acc1" in clients:
         acc1_c = clients["acc1"]["client"]
