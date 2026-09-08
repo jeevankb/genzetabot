@@ -497,13 +497,20 @@ def setup_commands(bot_client):
             if sender_id == accounts["acc1"]["user_id"]:
                 arg = event.pattern_match.group(1)
                 if not arg or not arg.strip():
-                    await event.reply(f"⚡ **Current Speed:** 1 message every **{message_speed}s**.\nTo change, use: `/setspeed 15s` or `/setspeed 30s`.")
+                    await event.reply(
+                        f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
+                        f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
+                        f"To change, send: `/setspeed 15s`, `/setspeed 10s`, or `/setspeed 30s`."
+                    )
                     return
                 speed_val = parse_time_to_seconds(arg.strip())
                 if speed_val is not None and speed_val > 0:
                     message_speed = int(speed_val)
                     await save_state_to_telegram()
-                    await event.reply(f"⚡ Speed set to 1 message every **{message_speed} seconds** by User 1. (Saved)")
+                    await event.reply(
+                        f"⚡ **Speed Updated for ALL Accounts!**\n\n"
+                        f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
+                    )
                 else:
                     await event.reply("❌ Invalid speed! Example: `/setspeed 15s` or `/setspeed 30s`.")
         except Exception as e:
@@ -759,18 +766,26 @@ async def chat_loop():
     import time
     rate_limited_until = {}
     
+    last_chosen_key = None
+    
     while True:
         current_time = time.time()
         available_keys = [k for k in active_keys if rate_limited_until.get(k, 0) < current_time]
         
         if bot_active and conversation_data and available_keys:
+            loop_start = time.time()
             msg_data = conversation_data[csv_index]
             
             sender_str = msg_data.get("sender", "").strip()
-            if sender_str in available_keys:
+            # Ensure fair round-robin rotation across all accounts (Account 1, 2, 3)
+            other_keys = [k for k in available_keys if k != last_chosen_key]
+            if sender_str in other_keys:
                 chosen_key = sender_str
+            elif other_keys:
+                chosen_key = random.choice(other_keys)
             else:
                 chosen_key = random.choice(available_keys)
+            last_chosen_key = chosen_key
                 
             client = clients[chosen_key]["client"]
             name = clients[chosen_key]["name"]
@@ -803,7 +818,6 @@ async def chat_loop():
                     total_messages_sent += 1
                     if delete_delay > 0:
                         asyncio.create_task(delete_message_later(client, entity.id, sent_sticker.id, delete_delay))
-                    await asyncio.sleep(message_speed)
                 
                 reply_msg_id = None
                 if reply_to_csv and reply_to_csv in message_tracker:
@@ -867,7 +881,10 @@ async def chat_loop():
                 logging.error(f"Error sending message: {e}")
                 await asyncio.sleep(3)
                 
-            await asyncio.sleep(message_speed)
+            # Precise message_speed interval across ALL accounts
+            elapsed = time.time() - loop_start
+            sleep_duration = max(0.5, message_speed - elapsed)
+            await asyncio.sleep(sleep_duration)
         else:
             await asyncio.sleep(2)
 
@@ -898,26 +915,35 @@ async def main():
         api_id = cfg["api_id"]
         api_hash = cfg["api_hash"]
         
-        try:
-            if session_str:
-                client = TelegramClient(StringSession(session_str), api_id, api_hash)
-                await client.start()
-                clients[key] = {"client": client, "name": cfg["name"]}
-                logging.info(f"Connected {cfg['name']} via Session String.")
-            elif bot_token and key == "acc4":
-                client = TelegramClient(StringSession(), api_id, api_hash)
-                await client.start(bot_token=bot_token)
-                clients[key] = {"client": client, "name": cfg["name"]}
-                logging.info(f"Connected {cfg['name']} via Bot Token.")
-        except FloodWaitError as e:
-            logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds} seconds before logging in. Sleeping...")
-            await asyncio.sleep(e.seconds + 2)
-            if session_str:
-                await client.start()
-            elif bot_token and key == "acc4":
-                await client.start(bot_token=bot_token)
-            clients[key] = {"client": client, "name": cfg["name"]}
-            logging.info(f"Connected {cfg['name']} after waiting.")
+        if not session_str and not bot_token:
+            continue
+            
+        connected = False
+        for attempt in range(1, 6):
+            try:
+                if session_str:
+                    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                    await client.start()
+                    clients[key] = {"client": client, "name": cfg["name"]}
+                    logging.info(f"Connected {cfg['name']} via Session String.")
+                    connected = True
+                    break
+                elif bot_token and key == "acc4":
+                    client = TelegramClient(StringSession(), api_id, api_hash)
+                    await client.start(bot_token=bot_token)
+                    clients[key] = {"client": client, "name": cfg["name"]}
+                    logging.info(f"Connected {cfg['name']} via Bot Token.")
+                    connected = True
+                    break
+            except FloodWaitError as e:
+                logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds}s before logging in. Sleeping...")
+                await asyncio.sleep(e.seconds + 2)
+            except Exception as e:
+                logging.warning(f"[{cfg['name']}] Connection attempt {attempt}/5 failed ({e}). Telegram servers may have temporary issues. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+                
+        if not connected:
+            logging.error(f"Failed to connect {cfg['name']} after 5 attempts. Continuing with other accounts.")
             
     global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY
     BOT_ENTITY = None
@@ -993,6 +1019,32 @@ async def main():
                         await event.reply("❌ Invalid format! Example: `/setdelete 15m`, `/setdelete 1h`, `/setdelete 7days`")
             except Exception as e:
                 logging.error(f"Error in acc1_saved_setdelete: {e}")
+
+        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
+        async def acc1_saved_setspeed(event):
+            try:
+                if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) == accounts["acc1"]["user_id"])):
+                    global message_speed
+                    arg = event.pattern_match.group(1)
+                    if not arg or not arg.strip():
+                        await event.reply(
+                            f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
+                            f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
+                            f"To change, send: `/setspeed 15s`, `/setspeed 10s`, or `/setspeed 30s`."
+                        )
+                        return
+                    speed_val = parse_time_to_seconds(arg.strip())
+                    if speed_val is not None and speed_val > 0:
+                        message_speed = int(speed_val)
+                        await save_state_to_telegram()
+                        await event.reply(
+                            f"⚡ **Speed Updated for ALL Accounts!**\n\n"
+                            f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
+                        )
+                    else:
+                        await event.reply("❌ Invalid speed! Example: `/setspeed 15s` or `/setspeed 30s`.")
+            except Exception as e:
+                logging.error(f"Error in acc1_saved_setspeed: {e}")
 
     # Warm up human accounts entity cache safely
     for key, c in clients.items():
