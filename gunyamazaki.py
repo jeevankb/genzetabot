@@ -44,14 +44,14 @@ except Exception as ge:
 
 # Data loading
 CSV_FILE = "anime_group_chat_10000.csv"
-TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+1tWK4j-BYC85MDVl")
-TARGET_CHAT_ID = None
+TARGET_CHAT = os.getenv("TARGET_CHAT", "-1003529827660")
+TARGET_CHAT_ID = -1003529827660
 conversation_data = []
 
 # Arise Auto-Catcher Configuration
-SPAWN_CHAT = os.getenv("SPAWN_CHAT", "https://t.me/+wO6jijXTj1VhNWQ1")
-SPAWN_CHAT_ID = None
-SPAWN_CHAT_TITLE = "Prisoner world"
+SPAWN_CHAT = os.getenv("SPAWN_CHAT", "-1003529827660")
+SPAWN_CHAT_ID = -1003529827660
+SPAWN_CHAT_TITLE = "Bleach world 👾"
 arise_autocatch_active = True
 account_rate_limited_until = {}
 processed_spawn_ids = set()
@@ -1155,21 +1155,17 @@ async def main():
 
     global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
     if "acc1" in clients:
-        # Step 1: Search dialogs of Account 1 for "prisoner"
-        try:
-            dialogs = await clients["acc1"]["client"].get_dialogs(limit=100)
-            for d in dialogs:
-                if d.is_group or d.is_channel:
-                    t = (d.title or "").strip()
-                    if "prisoner" in t.lower():
-                        SPAWN_CHAT_ID = d.id
-                        SPAWN_CHAT_TITLE = t
-                        logging.info(f"🎯 Auto-discovered target group from dialogs: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
-                        break
-        except Exception as de:
-            logging.warning(f"Failed scanning dialogs for Prisoner group: {de}")
+        # Step 1: If SPAWN_CHAT_ID is known, fetch its title directly
+        if SPAWN_CHAT_ID and isinstance(SPAWN_CHAT_ID, int):
+            try:
+                spawn_ent = await clients["acc1"]["client"].get_entity(SPAWN_CHAT_ID)
+                if hasattr(spawn_ent, 'title') and spawn_ent.title:
+                    SPAWN_CHAT_TITLE = spawn_ent.title
+                logging.info(f"🎯 Auto-Catcher target group resolved: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
+            except Exception as e:
+                logging.warning(f"Could not fetch entity for SPAWN_CHAT_ID {SPAWN_CHAT_ID}: {e}")
 
-        # Step 2: If not found yet, try resolving SPAWN_CHAT link or ID
+        # Step 2: Fallback if not resolved
         if not SPAWN_CHAT_ID and SPAWN_CHAT:
             try:
                 if isinstance(SPAWN_CHAT, str) and (SPAWN_CHAT.startswith("-100") or SPAWN_CHAT.lstrip('-').isdigit()):
@@ -1212,10 +1208,10 @@ async def main():
                 except Exception:
                     pass
 
-                # If from Prisoner world, ALWAYS process and lock onto it!
-                if "prisoner" in chat_title.lower():
+                # If from Bleach world or Prisoner world, ALWAYS process and lock onto it!
+                if any(term in chat_title.lower() for term in ["bleach", "prisoner"]):
                     globals()['SPAWN_CHAT_ID'] = event.chat_id
-                    globals()['SPAWN_CHAT_TITLE'] = chat_title or "Prisoner world"
+                    globals()['SPAWN_CHAT_TITLE'] = chat_title or "Bleach world 👾"
                 elif SPAWN_CHAT_ID and event.chat_id == SPAWN_CHAT_ID:
                     pass
                 elif TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID:
