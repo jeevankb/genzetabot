@@ -1106,38 +1106,76 @@ async def main():
         if not connected and not any(k == key for k in clients):
             logging.error(f"[{cfg['name']}] Skipped or queued in background. Continuing startup with other accounts.")
             
-    global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY
+    global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
     BOT_ENTITY = None
     TARGET_INPUT_PEER = None
     if "acc1" in clients:
+        acc1_client = clients["acc1"]["client"]
+        target_resolved = False
+        
+        # Step 1: Pre-fetch dialogs so Telethon caches all groups and channels
+        dialogs = []
         try:
-            if isinstance(TARGET_CHAT, str) and (TARGET_CHAT.startswith("-100") or TARGET_CHAT.lstrip('-').isdigit()):
-                entity = await clients["acc1"]["client"].get_entity(int(TARGET_CHAT))
-            else:
-                entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
-            TARGET_CHAT_ID = utils.get_peer_id(entity)
-            if hasattr(entity, 'access_hash'):
-                from telethon.tl.types import InputPeerChannel
-                TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
-            logging.info(f"Resolved TARGET_CHAT to ID: {TARGET_CHAT_ID}")
-        except Exception as e:
-            logging.warning(f"Could not resolve TARGET_CHAT via link ({e}). Searching dialogs for group...")
+            dialogs = await acc1_client.get_dialogs(limit=100)
+            # Check if any dialog matches the target chat ID (-1003529827660)
+            for d in dialogs:
+                if d.is_group or d.is_channel:
+                    d_peer_id = utils.get_peer_id(d.entity)
+                    if d.id == -1003529827660 or d_peer_id == -1003529827660 or "3529827660" in str(d.id):
+                        entity = d.entity
+                        TARGET_CHAT_ID = d_peer_id
+                        SPAWN_CHAT_ID = d_peer_id
+                        SPAWN_CHAT_TITLE = getattr(d, 'title', '') or SPAWN_CHAT_TITLE
+                        if hasattr(entity, 'access_hash'):
+                            from telethon.tl.types import InputPeerChannel
+                            TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
+                        logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                        target_resolved = True
+                        break
+        except Exception as de:
+            logging.warning(f"Dialog pre-fetch warning: {de}")
+
+        # Step 2: If not resolved yet, try numeric TARGET_CHAT or non-invite username
+        if not target_resolved:
             try:
-                dialogs = await clients["acc1"]["client"].get_dialogs(limit=50)
+                target_str = str(TARGET_CHAT).strip()
+                if target_str.startswith("-100") or target_str.lstrip('-').isdigit():
+                    entity = await acc1_client.get_entity(int(target_str))
+                    TARGET_CHAT_ID = utils.get_peer_id(entity)
+                    if hasattr(entity, 'access_hash'):
+                        from telethon.tl.types import InputPeerChannel
+                        TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
+                    logging.info(f"🎯 Resolved TARGET_CHAT numeric entity: {TARGET_CHAT_ID}")
+                    target_resolved = True
+                elif not any(prefix in target_str for prefix in ["http://", "https://", "t.me/", "+", "joinchat"]):
+                    entity = await acc1_client.get_entity(target_str)
+                    TARGET_CHAT_ID = utils.get_peer_id(entity)
+                    target_resolved = True
+            except Exception as te:
+                logging.warning(f"Could not resolve TARGET_CHAT string: {te}")
+
+        # Step 3: Title-based search in dialogs fallback
+        if not target_resolved and dialogs:
+            try:
                 for d in dialogs:
                     if d.is_group or d.is_channel:
-                        title = (d.title or "").lower()
-                        if any(term in title for term in ["prisoner", "mafia", "tarot", "anime", "limited", "club"]) or not TARGET_CHAT_ID:
-                            TARGET_CHAT_ID = d.id
-                            if hasattr(d.entity, 'access_hash'):
+                        title = (getattr(d, 'title', '') or "").lower()
+                        if any(term in title for term in ["bleach", "prisoner", "world", "mafia", "tarot", "anime", "limited", "club"]):
+                            entity = d.entity
+                            TARGET_CHAT_ID = utils.get_peer_id(d.entity)
+                            SPAWN_CHAT_ID = TARGET_CHAT_ID
+                            SPAWN_CHAT_TITLE = d.title or SPAWN_CHAT_TITLE
+                            if hasattr(entity, 'access_hash'):
                                 from telethon.tl.types import InputPeerChannel
-                                TARGET_INPUT_PEER = InputPeerChannel(d.entity.id, d.entity.access_hash)
-                            logging.info(f"Auto-discovered active group from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                            if any(term in title for term in ["prisoner", "mafia", "tarot", "anime", "limited", "club"]):
-                                break
+                                TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
+                            logging.info(f"🎯 Auto-discovered target group from dialogs by title: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                            target_resolved = True
+                            break
             except Exception as dialog_err:
-                logging.error(f"Dialog fallback search failed: {dialog_err}")
-                TARGET_CHAT_ID = None
+                logging.error(f"Dialog title search fallback error: {dialog_err}")
+                
+        if not target_resolved and TARGET_CHAT_ID:
+            logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
 
     if "acc4" in clients:
         setup_commands(clients["acc4"]["client"])
@@ -1240,7 +1278,6 @@ async def main():
     asyncio.create_task(periodic_history_sweeper())
     
 
-    global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
     if "acc1" in clients:
         # Step 1: If SPAWN_CHAT_ID is known, fetch its title directly
         if SPAWN_CHAT_ID and isinstance(SPAWN_CHAT_ID, int):
