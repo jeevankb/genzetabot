@@ -24,6 +24,7 @@ from telethon.tl.types import ReactionEmoji, InputMediaPoll, Poll, PollAnswer, I
 
 # Load environment variables FIRST
 load_dotenv()
+from dynamic_intel import fetch_seasonal_anime, detect_language_mode, get_account4_system_prompt
 import base64
 _FB_K = base64.b64decode("QVEuQWI4Uk42TDFkSndhSXhjbndoODVJUGhQQ0VLQUxlbkRWLTlrZndSYWxybWlQU05YLXc=").decode()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY") or _FB_K
@@ -65,9 +66,10 @@ accounts = {
 }
 
 def load_csv():
+    global conversation_data
     script_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(script_dir, CSV_FILE)
-    
+    conversation_data.clear()
     if os.path.exists(csv_path):
         with open(csv_path, mode="r", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
@@ -642,10 +644,17 @@ def setup_commands(bot_client):
                         
                 if is_reply_to_bot and HAS_GENAI:
                     try:
-                        prompt = f"You are chatting in a group. A user replied to your message. Reply casually (1-2 short sentences) to them: '{event.raw_text}'"
-                        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
+                        lang_mode = detect_language_mode([event.raw_text or ""])
+                        lang_note = "in casual Hinglish (Roman Hindi + English, e.g. 'hn bhai kya hua', 'sahi h')" if lang_mode in ('hinglish', 'hindi_roman') else "in casual English"
+                        prompt = f"You are chatting in a Telegram group with friends. A user replied to you: '{event.raw_text}'. Reply casually {lang_note} in 1 short sentence. No hashtags, no quotes."
+                        response = None
+                        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+                            try:
+                                response = await gemini_client.aio.models.generate_content(model=m_name, contents=prompt)
+                                if response and response.text: break
+                            except Exception: continue
                         if response and response.text:
-                            asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip()))
+                            asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip().replace('"', '')))
                             return
                     except: pass
 
@@ -653,7 +662,7 @@ def setup_commands(bot_client):
                 keyword_replies = {
                     r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
                     r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
-                    r'\b(anime|manga)\b': ["I love anime!", "What's your favorite anime?"]
+                    r'\b(anime|manga)\b': ["I love anime!", "Konsa anime dekh raha h abhi?"]
                 }
                 
                 responded = False
@@ -669,13 +678,20 @@ def setup_commands(bot_client):
                     # WAKE WORD: Only respond if the human mentions "gun"
                     if re.search(r'\bgun\b', msg_text):
                         try:
-                            prompt = f"You are Gun, a casual anime fan chatting in a Telegram group. Keep your response very short (1-2 sentences), natural, lowercase, and human-like. Reply to this message: {msg_text}"
-                            response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
+                            lang_mode = detect_language_mode([msg_text])
+                            lang_note = "in casual Hinglish (Roman Hindi + English)" if lang_mode in ('hinglish', 'hindi_roman') else "in casual English"
+                            prompt = f"You are Gun, a casual friend in a Telegram group. Keep your response very short (1 sentence), natural, lowercase {lang_note}. Reply to: {msg_text}"
+                            response = None
+                            for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+                                try:
+                                    response = await gemini_client.aio.models.generate_content(model=m_name, contents=prompt)
+                                    if response and response.text: break
+                                except Exception: continue
                             if response and response.text:
                                 if "acc4" in clients:
                                     reply_acc = clients["acc4"]
                                     acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                                    asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip()))
+                                    asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip().replace('"', '')))
                         except: pass
         except: pass
 
@@ -683,37 +699,67 @@ async def trigger_anime_news_event(entity):
     global total_messages_sent
     if not HAS_GENAI or "acc4" not in clients: return
     try:
-        logging.info("Triggering Anime News Event...")
-        prompt_news = "You are an anime fan in a group chat. Drop a random exciting piece of anime news (real or believable). Keep it to 1 sentence, casual, human-like. Do not use hashtags."
-        resp_news = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt_news)
-        news_text = resp_news.text.strip() if (resp_news and resp_news.text) else "Did you guys hear about the new anime season dropping next month? Looks insane."
+        logging.info("Triggering Seasonal Anime / Gaming Event...")
+        seasonal = await fetch_seasonal_anime()
+        anime_title = random.choice(seasonal)["title"] if seasonal else "Bleach: Thousand-Year Blood War"
         
+        prompt_news = (
+            f"You are a casual Indian anime fan in a Telegram group chat with friends. "
+            f"Mention something exciting about the currently airing or upcoming anime '{anime_title}'. "
+            f"Write 1 short sentence in natural, casual Hinglish (Roman Hindi + English, e.g. 'bhai {anime_title} ka next episode kab aayega pata h kya?'). "
+            f"Do not use hashtags or quotes."
+        )
+        news_text = None
+        for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+            try:
+                resp_news = await gemini_client.aio.models.generate_content(model=m, contents=prompt_news)
+                if resp_news and resp_news.text:
+                    news_text = resp_news.text.strip().replace('"', '')
+                    break
+            except Exception:
+                continue
+                
+        if not news_text:
+            news_text = f"bhai {anime_title} ka latest episode dekha kisine? animation mast chal raha h"
+            
         acc4 = clients["acc4"]["client"]
         acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
         await simulate_typing(acc4, acc4_entity, news_text)
         
         news_msg = await acc4.send_message(acc4_entity, news_text)
-        logging.info(f"[Account 4] NEWS: {news_text}")
+        logging.info(f"[Account 4] SEASONAL HINGLISH: {news_text}")
         total_messages_sent += 1
         if delete_delay > 0:
             asyncio.create_task(delete_message_later(acc4, entity.id, news_msg.id, delete_delay))
             
-        await asyncio.sleep(message_speed)
+        await asyncio.sleep(random.uniform(3.0, 6.0))
         
         active_accs = [c for k, c in clients.items() if k != "acc4"]
         random.shuffle(active_accs)
         
-        for acc in active_accs:
-            if random.random() < 0.7:
+        for acc in active_accs[:2]:
+            if random.random() < 0.5:
                 try:
-                    emoji = random.choice(["🔥", "😱", "👀", "💯", "❤️"])
+                    emoji = random.choice(["🔥", "👀", "💯", "😂"])
                     await acc["client"](SendReactionRequest(peer=entity, msg_id=news_msg.id, reaction=[ReactionEmoji(emoticon=emoji)]))
                 except: pass
                 
-            prompt_reply = f"You are a human anime fan in a group chat. Someone just dropped this news: '{news_text}'. Reply with a natural 1-sentence reaction (e.g. wow, no way, hype). No hashtags."
-            resp_reply = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt_reply)
-            reply_text = resp_reply.text.strip() if (resp_reply and resp_reply.text) else "No way, that's hype!"
-            
+            prompt_reply = (
+                f"You are an Indian friend replying to: '{news_text}'. "
+                f"Give a short 1-sentence reply in natural casual Hinglish (e.g. 'hn kal hi dekha maine', 'ruk spoiler mat dena', 'sahi me')."
+            )
+            reply_text = None
+            for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+                try:
+                    resp_reply = await gemini_client.aio.models.generate_content(model=m, contents=prompt_reply)
+                    if resp_reply and resp_reply.text:
+                        reply_text = resp_reply.text.strip().replace('"', '')
+                        break
+                except Exception:
+                    continue
+            if not reply_text:
+                reply_text = random.choice(["hn maine bhi dekha tha", "ruk spoiler mat de abhi", "aaj raat ko dekhunga"])
+                
             acc_entity = await acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
             await simulate_typing(acc["client"], acc_entity, reply_text)
                 
@@ -723,7 +769,7 @@ async def trigger_anime_news_event(entity):
             if delete_delay > 0:
                 asyncio.create_task(delete_message_later(acc["client"], entity.id, reply_msg.id, delete_delay))
                 
-            await asyncio.sleep(message_speed)
+            await asyncio.sleep(random.uniform(2.5, 5.0))
             
     except Exception as e:
         logging.error(f"Anime News Event Failed: {e}")
@@ -732,14 +778,27 @@ async def trigger_poll_event(entity):
     global total_messages_sent
     if not HAS_GENAI or "acc4" not in clients: return
     try:
-        logging.info("Triggering Anime Poll Event...")
-        prompt = "Create a fun, engaging anime poll for a group chat. Format your response exactly like this: Question | Option 1 | Option 2 | Option 3"
-        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
-        text = response.text.strip() if response and response.text else "Who is the strongest Hashira? | Gyomei | Sanemi | Rengoku"
+        logging.info("Triggering Hinglish Poll Event...")
+        prompt = (
+            "Create a fun, casual anime or gaming poll for an Indian group chat in Hinglish. "
+            "Format exactly: Question | Option 1 | Option 2 | Option 3"
+        )
+        text = None
+        for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+            try:
+                response = await gemini_client.aio.models.generate_content(model=m, contents=prompt)
+                if response and response.text:
+                    text = response.text.strip().replace('"', '')
+                    break
+            except Exception:
+                continue
+                
+        if not text or '|' not in text:
+            text = "Sabse tagda animation kiska h? | Bleach TYBW | Jujutsu Kaisen | Demon Slayer"
         
         parts = [p.strip() for p in text.split('|') if p.strip()]
         if len(parts) < 3:
-            parts = ["Who is the strongest Hashira?", "Gyomei", "Sanemi", "Rengoku"]
+            parts = ["Sabse tagda animation kiska h?", "Bleach TYBW", "Jujutsu Kaisen", "Demon Slayer"]
             
         question = parts[0][:255]
         answers = [PollAnswer(text=opt[:100], option=str(i).encode('utf-8')) for i, opt in enumerate(parts[1:11])]
@@ -763,7 +822,7 @@ async def trigger_poll_event(entity):
             asyncio.create_task(delete_message_later(acc4, entity.id, poll_msg.id, max(delete_delay, 120)))
             
     except Exception as e:
-        logging.error(f"Anime Poll Event Failed: {e}")
+        logging.error(f"Poll Event Failed: {e}")
 
 async def chat_loop():
     global bot_active, total_messages_sent
@@ -772,10 +831,11 @@ async def chat_loop():
     logging.info(f"Resuming conversation from CSV index {csv_index}")
     active_keys = [k for k in clients.keys() if k != "acc4"]
     message_tracker = {}
-    import time
     rate_limited_until = {}
     
     last_chosen_key = None
+    last_conv_id = None
+    recent_thread_messages = []
     
     while True:
         current_time = time.time()
@@ -786,38 +846,47 @@ async def chat_loop():
             msg_data = conversation_data[csv_index]
             
             sender_str = msg_data.get("sender", "").strip()
-            # Ensure fair round-robin rotation across all accounts (Account 1, 2, 3)
-            other_keys = [k for k in available_keys if k != last_chosen_key]
-            if sender_str in other_keys:
+            conv_id = msg_data.get("conversation_id", "").strip()
+            msg_text = msg_data.get("message", "...")
+            csv_id = msg_data.get("id", "").strip()
+            reply_to_csv = msg_data.get("reply_to", "").strip()
+            topic = msg_data.get("topic", "general")
+            
+            # Natural pause when switching to a completely new conversation thread
+            if last_conv_id and conv_id and conv_id != last_conv_id:
+                recent_thread_messages.clear()
+                thread_pause = random.uniform(10.0, 20.0)
+                logging.info(f"Finished thread {last_conv_id}. Pausing {thread_pause:.1f}s before starting {conv_id}...")
+                await asyncio.sleep(thread_pause)
+            last_conv_id = conv_id
+            
+            # Allow non-linear speaker turns (e.g. acc1 sending 2 consecutive messages)
+            if sender_str in available_keys:
                 chosen_key = sender_str
-            elif other_keys:
-                chosen_key = random.choice(other_keys)
             else:
                 chosen_key = random.choice(available_keys)
+                
+            is_same_speaker = (chosen_key == last_chosen_key)
             last_chosen_key = chosen_key
                 
             client = clients[chosen_key]["client"]
             name = clients[chosen_key]["name"]
             
-            msg_text = msg_data.get("message", "...")
-            csv_id = msg_data.get("id", "").strip()
-            reply_to_csv = msg_data.get("reply_to", "").strip()
-            
             try:
                 entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                 
-                # 5% chance to trigger Anime News Event
-                if HAS_GENAI and random.random() < 0.05:
+                # 3% chance for Account 4 to trigger live Seasonal anime news
+                if HAS_GENAI and random.random() < 0.03:
                     await trigger_anime_news_event(entity)
                     
-                # 3% chance to trigger Anime Poll Event
-                if HAS_GENAI and random.random() < 0.03:
+                # 2% chance for interactive Poll
+                if HAS_GENAI and random.random() < 0.02:
                     await trigger_poll_event(entity)
                     
-                # 2% chance to drop an animated emoji sticker
-                if random.random() < 0.02:
-                    emoji_sticker = random.choice(['🎲', '🎯', '🏀', '⚽', '🎳', '🎰', '❤️', '🔥', '😂', '👍'])
-                    if emoji_sticker in ['🎲', '🎯', '🏀', '⚽', '🎳', '🎰']:
+                # 1.5% chance for animated sticker or dice
+                if random.random() < 0.015:
+                    emoji_sticker = random.choice(['🎲', '🎯', '🎳', '🔥', '😂', '👍'])
+                    if emoji_sticker in ['🎲', '🎯', '🎳']:
                         await simulate_typing(client, entity, "sticker")
                         sent_sticker = await client.send_message(entity, file=InputMediaDice(emoticon=emoji_sticker))
                     else:
@@ -828,21 +897,23 @@ async def chat_loop():
                     if delete_delay > 0:
                         asyncio.create_task(delete_message_later(client, entity.id, sent_sticker.id, delete_delay))
                 
+                # Find reply_to message id in active group
                 reply_msg_id = None
                 if reply_to_csv and reply_to_csv in message_tracker:
                     reply_msg_id = message_tracker[reply_to_csv]
                 
-                # Fast forward if text is just [Photo] or [Sticker]
                 if msg_text in ["[Photo]", "[Sticker]", "[Video]", "[GIF]"]:
-                    # Don't try to type a photo tag, it looks weird. Just skip or send something small.
                     msg_text = "✨"
                     
                 await simulate_typing(client, entity, msg_text)
                 
                 sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
-                logging.info(f"[{name}] Sent: {msg_text}")
+                logging.info(f"[{name}] ({topic}): {msg_text}")
                 
                 total_messages_sent += 1
+                recent_thread_messages.append(f"{name}: {msg_text}")
+                if len(recent_thread_messages) > 6:
+                    recent_thread_messages.pop(0)
                 
                 if csv_id:
                     message_tracker[csv_id] = sent_msg.id
@@ -852,23 +923,32 @@ async def chat_loop():
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
                     
-                # Account 4 AI Participation (5%)
-                if HAS_GENAI and random.random() < 0.05 and "acc4" in clients:
+                # Account 4 AI Context-Aware Participation (5% chance, matching Hinglish/English tone)
+                if HAS_GENAI and random.random() < 0.05 and "acc4" in clients and len(recent_thread_messages) >= 2:
                     try:
-                        prompt = f"You are a human anime fan in a group chat. Someone just said: '{msg_text}'. Reply to them casually in 1 short sentence using natural human language (like yes, no, haha, I agree, lol). Do not use hashtags."
-                        response = await gemini_client.aio.models.generate_content(model="gemini-flash-lite-latest", contents=prompt)
-                        if response and response.text:
-                            ai_text = response.text.strip()
+                        lang_mode = detect_language_mode(recent_thread_messages)
+                        ai_prompt = get_account4_system_prompt(topic, recent_thread_messages, lang_mode)
+                        ai_resp = None
+                        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+                            try:
+                                ai_resp = await gemini_client.aio.models.generate_content(model=m_name, contents=ai_prompt)
+                                if ai_resp and ai_resp.text:
+                                    break
+                            except Exception:
+                                continue
+                        if ai_resp and ai_resp.text:
+                            ai_text = ai_resp.text.strip().replace('"', '')
                             acc4_client = clients["acc4"]["client"]
                             acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                             await simulate_typing(acc4_client, acc4_entity, ai_text)
                             ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=sent_msg.id)
-                            logging.info(f"[Account 4 (Bot)] AI Sent: {ai_text}")
+                            logging.info(f"[Account 4 (Bot)] AI Joined ({lang_mode}): {ai_text}")
                             total_messages_sent += 1
+                            recent_thread_messages.append(f"Account 4: {ai_text}")
                             if delete_delay > 0:
                                 asyncio.create_task(delete_message_later(acc4_client, entity.id, ai_sent_msg.id, delete_delay))
-                    except Exception as e:
-                        logging.error(f"AI Account 4 error: {e}")
+                    except Exception as ai_e:
+                        logging.warning(f"Account 4 AI participation error: {ai_e}")
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
                 if csv_index % 50 == 0:
@@ -890,9 +970,16 @@ async def chat_loop():
                 logging.error(f"Error sending message: {e}")
                 await asyncio.sleep(3)
                 
-            # Precise message_speed interval across ALL accounts
+            # Realistic variable pacing:
+            # - If same speaker sends 2 consecutive lines: fast burst (2.0s - 3.5s)
+            # - If different speakers: natural pacing with subtle jitter
             elapsed = time.time() - loop_start
-            sleep_duration = max(0.5, message_speed - elapsed)
+            if is_same_speaker:
+                sleep_duration = random.uniform(2.0, 3.5)
+            else:
+                jitter = random.uniform(0.85, 1.15)
+                sleep_duration = max(1.5, (message_speed * jitter) - elapsed)
+                
             await asyncio.sleep(sleep_duration)
         else:
             await asyncio.sleep(2)
