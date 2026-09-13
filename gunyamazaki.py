@@ -44,7 +44,8 @@ except Exception as ge:
     logging.warning(f"Could not initialize Gemini AI: {ge}")
 
 # Data loading
-CSV_FILE = "anime_group_chat_10000.csv"
+active_day_name = datetime.datetime.now().strftime("%A").lower()
+CSV_FILE = f"conversations_{active_day_name}.csv"
 TARGET_CHAT = os.getenv("TARGET_CHAT", "-1003529827660")
 TARGET_CHAT_ID = -1003529827660
 conversation_data = []
@@ -65,17 +66,31 @@ accounts = {
     "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
-def load_csv():
-    global conversation_data
+def load_csv(day_name=None):
+    global conversation_data, CSV_FILE, active_day_name
+    if day_name:
+        active_day_name = day_name.lower().strip()
+    else:
+        active_day_name = datetime.datetime.now().strftime("%A").lower()
+        
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, CSV_FILE)
+    day_csv = f"conversations_{active_day_name}.csv"
+    candidate_path = os.path.join(script_dir, day_csv)
+    
+    if os.path.exists(candidate_path):
+        CSV_FILE = day_csv
+        csv_path = candidate_path
+    else:
+        CSV_FILE = "anime_group_chat_10000.csv"
+        csv_path = os.path.join(script_dir, CSV_FILE)
+        
     conversation_data.clear()
     if os.path.exists(csv_path):
         with open(csv_path, mode="r", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
             for row in reader:
                 conversation_data.append(row)
-        logging.info(f"Loaded {len(conversation_data)} messages from {CSV_FILE}.")
+        logging.info(f"Loaded {len(conversation_data)} messages from {CSV_FILE} (Day: {active_day_name.capitalize()}).")
     else:
         logging.error(f"{CSV_FILE} not found in the directory.")
 
@@ -90,7 +105,7 @@ STATE_MSG_ID = None
 current_csv_index = 0
 
 async def load_state_from_telegram():
-    global STATE_MSG_ID, current_csv_index, delete_delay, message_speed
+    global STATE_MSG_ID, current_csv_index, delete_delay, message_speed, active_day_name
     try:
         acc1 = clients["acc1"]["client"]
         async for msg in acc1.iter_messages("me", search="[GunYamazaki State]"):
@@ -98,6 +113,7 @@ async def load_state_from_telegram():
                 STATE_MSG_ID = msg.id
                 try:
                     parts = msg.text.split()
+                    saved_day = None
                     for p in parts:
                         if p.startswith("csv_index="):
                             current_csv_index = int(p.split("=")[1])
@@ -107,20 +123,34 @@ async def load_state_from_telegram():
                         elif p.startswith("message_speed="):
                             message_speed = int(p.split("=")[1])
                             logging.info(f"Restored message_speed from Telegram: {message_speed}s")
+                        elif p.startswith("day="):
+                            saved_day = p.split("=")[1].lower().strip()
+                            
+                    today_day = datetime.datetime.now().strftime("%A").lower()
+                    if saved_day and saved_day != today_day:
+                        logging.info(f"Saved state day ({saved_day}) differs from today ({today_day}). Starting fresh at index 0 for {today_day}.")
+                        current_csv_index = 0
+                        load_csv(today_day)
+                    elif saved_day:
+                        active_day_name = saved_day
+                        load_csv(active_day_name)
+                    else:
+                        load_csv(today_day)
                     return current_csv_index
                 except: pass
                 break
     except Exception as e:
         logging.error(f"Failed to load state from telegram: {e}")
+    load_csv()
     return 0
 
 async def save_state_to_telegram(csv_idx=None):
-    global STATE_MSG_ID, current_csv_index
+    global STATE_MSG_ID, current_csv_index, active_day_name
     if csv_idx is not None:
         current_csv_index = csv_idx
     try:
         acc1 = clients["acc1"]["client"]
-        text = f"[GunYamazaki State] csv_index={current_csv_index} delete_delay={delete_delay} message_speed={message_speed}"
+        text = f"[GunYamazaki State] csv_index={current_csv_index} delete_delay={delete_delay} message_speed={message_speed} day={active_day_name}"
         if STATE_MSG_ID:
             await acc1.edit_message("me", STATE_MSG_ID, text)
         else:
@@ -426,8 +456,63 @@ def setup_commands(bot_client):
                 del_str = format_seconds_to_readable(delete_delay)
                 catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
                 catch_status = f"🟢 ONLINE (Gemini AI Vision | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
-                await event.reply(f"📊 **GunYamazaki Stats**\n\nStatus: {status}\nSpeed: {message_speed}s\nAuto-Delete: {del_str}\nAuto-Catch: {catch_status}\nMessages Sent: {total_messages_sent}")
+                day_cap = active_day_name.capitalize()
+                await event.reply(
+                    f"📊 **GunYamazaki Stats**\n\n"
+                    f"Status: {status}\n"
+                    f"Speed: {message_speed}s\n"
+                    f"Auto-Delete: {del_str}\n"
+                    f"Auto-Catch: {catch_status}\n"
+                    f"Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
+                    f"CSV Progress: {current_csv_index}/{len(conversation_data)} msgs\n"
+                    f"Messages Sent: {total_messages_sent}"
+                )
         except: pass
+
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:day|dayinfo)(?:@genzetabot)?$'))
+    async def day_handler(event):
+        if should_skip(): return
+        try:
+            if is_admin(event):
+                day_cap = active_day_name.capitalize()
+                total_msgs = len(conversation_data)
+                await event.reply(
+                    f"📅 **Active Daily Dataset Info**\n\n"
+                    f"• **Current Day:** {day_cap}\n"
+                    f"• **Active CSV:** `{CSV_FILE}`\n"
+                    f"• **Loaded Messages:** {total_msgs:,} Hinglish messages\n"
+                    f"• **Current Index:** {current_csv_index} / {total_msgs}\n"
+                    f"• **Auto-Midnight Rollover:** 🟢 ACTIVE (00:00:00 IST)\n\n"
+                    f"💡 *To switch day manually, send:* `/setday monday`, `/setday friday`, etc."
+                )
+        except: pass
+
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/setday(?:@genzetabot)?(?:\s+(.+))?$'))
+    async def setday_handler(event):
+        if should_skip(): return
+        global current_csv_index
+        try:
+            if is_admin(event):
+                arg = event.pattern_match.group(1)
+                valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+                if not arg or arg.strip().lower() not in valid_days:
+                    days_list = ", ".join(f"`{d}`" for d in valid_days)
+                    await event.reply(f"❌ Please specify a valid day!\nAvailable days: {days_list}\nExample: `/setday friday`")
+                    return
+                target_day = arg.strip().lower()
+                load_csv(target_day)
+                current_csv_index = 0
+                await save_state_to_telegram(0)
+                await event.reply(
+                    f"✅ **Active Day Switched!**\n\n"
+                    f"• **New Day:** {target_day.capitalize()}\n"
+                    f"• **Loaded CSV:** `{CSV_FILE}`\n"
+                    f"• **Total Messages:** {len(conversation_data):,} rows\n"
+                    f"• **Conversation Index:** Reset to 0"
+                )
+                logging.info(f"Admin manually switched active day to {target_day.capitalize()} ({CSV_FILE})")
+        except Exception as e:
+            logging.error(f"Error in setday_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern='(?i)^/ariseon(?:@genzetabot)?$'))
     async def ariseon_handler(event):
@@ -582,7 +667,7 @@ def setup_commands(bot_client):
         if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
             return
         BOT_ENTITY = event.input_chat
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/autodelete", "/setdel", "/delete", "/setspeed", "/speed", "/stats", "/arise")):
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/autodelete", "/setdel", "/delete", "/setspeed", "/speed", "/stats", "/arise", "/day", "/setday")):
             return
             
         try:
@@ -825,10 +910,13 @@ async def trigger_poll_event(entity):
         logging.error(f"Poll Event Failed: {e}")
 
 async def chat_loop():
-    global bot_active, total_messages_sent
+    global bot_active, total_messages_sent, current_csv_index, active_day_name
     
     csv_index = await load_state_from_telegram()
-    logging.info(f"Resuming conversation from CSV index {csv_index}")
+    if not conversation_data:
+        load_csv()
+    current_csv_index = csv_index
+    logging.info(f"Resuming conversation from CSV index {csv_index} (Day: {active_day_name.capitalize()}, Dataset: {CSV_FILE})")
     active_keys = [k for k in clients.keys() if k != "acc4"]
     message_tracker = {}
     rate_limited_until = {}
@@ -836,9 +924,25 @@ async def chat_loop():
     last_chosen_key = None
     last_conv_id = None
     recent_thread_messages = []
+    last_checked_day = active_day_name
     
     while True:
         current_time = time.time()
+        
+        # Check for midnight day rollover
+        now_day = datetime.datetime.now().strftime("%A").lower()
+        if now_day != last_checked_day:
+            logging.info(f"🕛 [Midnight Rollover] Day changed from {last_checked_day} to {now_day}! Hot-reloading today's dataset...")
+            load_csv(now_day)
+            csv_index = 0
+            current_csv_index = 0
+            last_checked_day = now_day
+            last_conv_id = None
+            message_tracker.clear()
+            recent_thread_messages.clear()
+            asyncio.create_task(save_state_to_telegram(csv_index))
+            logging.info(f"✅ Hot-reloaded {CSV_FILE} ({len(conversation_data):,} messages) for {now_day.capitalize()} with zero downtime.")
+            
         available_keys = [k for k in active_keys if rate_limited_until.get(k, 0) < current_time]
         
         if bot_active and conversation_data and available_keys:
@@ -951,6 +1055,7 @@ async def chat_loop():
                         logging.warning(f"Account 4 AI participation error: {ai_e}")
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
+                current_csv_index = csv_index
                 if csv_index % 50 == 0:
                     asyncio.create_task(save_state_to_telegram(csv_index))
             except FloodWaitError as e:
