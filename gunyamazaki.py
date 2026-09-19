@@ -263,10 +263,14 @@ async def periodic_history_sweeper():
             logging.error(f"Periodic sweeper error: {e}")
 
 async def simulate_typing(client, entity, text):
-    if message_speed <= 1:
+    if message_speed <= 1.0:
         return
-    max_type = min(max(message_speed * 0.3, 0.5), 3.0)
-    typing_time = min(max(len(text) * 0.03, 0.5), max_type)
+    if message_speed <= 5.0:
+        max_type = min(max(message_speed * 0.15, 0.3), 0.8)
+        typing_time = min(max(len(text) * 0.015, 0.25), max_type)
+    else:
+        max_type = min(max(message_speed * 0.25, 0.5), 2.5)
+        typing_time = min(max(len(text) * 0.025, 0.4), max_type)
     try:
         async with client.action(entity, 'typing'):
             await asyncio.sleep(typing_time)
@@ -909,6 +913,35 @@ async def trigger_poll_event(entity):
     except Exception as e:
         logging.error(f"Poll Event Failed: {e}")
 
+async def trigger_acc4_ai_reaction(target_entity, reply_to_msg_id, thread_context, topic_name):
+    global total_messages_sent
+    if not HAS_GENAI or "acc4" not in clients:
+        return
+    try:
+        lang_mode = detect_language_mode(thread_context)
+        ai_prompt = get_account4_system_prompt(topic_name, thread_context, lang_mode)
+        ai_resp = None
+        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+            try:
+                ai_resp = await gemini_client.aio.models.generate_content(model=m_name, contents=ai_prompt)
+                if ai_resp and ai_resp.text:
+                    break
+            except Exception:
+                continue
+        if ai_resp and ai_resp.text:
+            ai_text = ai_resp.text.strip().replace('"', '')
+            acc4_client = clients["acc4"]["client"]
+            acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            await simulate_typing(acc4_client, acc4_entity, ai_text)
+            ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=reply_to_msg_id)
+            logging.info(f"[Account 4 (Bot)] AI Joined ({lang_mode}): {ai_text}")
+            total_messages_sent += 1
+            thread_context.append(f"Account 4: {ai_text}")
+            if delete_delay > 0:
+                asyncio.create_task(delete_message_later(acc4_client, target_entity.id, ai_sent_msg.id, delete_delay))
+    except Exception as ai_e:
+        logging.warning(f"Account 4 AI participation error: {ai_e}")
+
 async def chat_loop():
     global bot_active, total_messages_sent, current_csv_index, active_day_name
     
@@ -920,6 +953,7 @@ async def chat_loop():
     active_keys = [k for k in clients.keys() if k != "acc4"]
     message_tracker = {}
     rate_limited_until = {}
+    cached_entities = {}
     
     last_chosen_key = None
     last_conv_id = None
@@ -959,7 +993,14 @@ async def chat_loop():
             # Natural pause when switching to a completely new conversation thread
             if last_conv_id and conv_id and conv_id != last_conv_id:
                 recent_thread_messages.clear()
-                thread_pause = random.uniform(10.0, 20.0)
+                if message_speed <= 3.0:
+                    thread_pause = random.uniform(0.5, 1.2)
+                elif message_speed <= 5.0:
+                    thread_pause = random.uniform(1.0, 2.0)
+                elif message_speed <= 10.0:
+                    thread_pause = random.uniform(2.0, 4.0)
+                else:
+                    thread_pause = min(random.uniform(4.0, 8.0), message_speed * 0.8)
                 logging.info(f"Finished thread {last_conv_id}. Pausing {thread_pause:.1f}s before starting {conv_id}...")
                 await asyncio.sleep(thread_pause)
             last_conv_id = conv_id
@@ -977,15 +1018,17 @@ async def chat_loop():
             name = clients[chosen_key]["name"]
             
             try:
-                entity = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                if chosen_key not in cached_entities:
+                    cached_entities[chosen_key] = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                entity = cached_entities[chosen_key]
                 
-                # 3% chance for Account 4 to trigger live Seasonal anime news
+                # 3% chance for Account 4 to trigger live Seasonal anime news (non-blocking)
                 if HAS_GENAI and random.random() < 0.03:
-                    await trigger_anime_news_event(entity)
+                    asyncio.create_task(trigger_anime_news_event(entity))
                     
-                # 2% chance for interactive Poll
+                # 2% chance for interactive Poll (non-blocking)
                 if HAS_GENAI and random.random() < 0.02:
-                    await trigger_poll_event(entity)
+                    asyncio.create_task(trigger_poll_event(entity))
                     
                 # 1.5% chance for animated sticker or dice
                 if random.random() < 0.015:
@@ -1027,38 +1070,16 @@ async def chat_loop():
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
                     
-                # Account 4 AI Context-Aware Participation (5% chance, matching Hinglish/English tone)
+                # Account 4 AI Context-Aware Participation (5% chance, non-blocking background task)
                 if HAS_GENAI and random.random() < 0.05 and "acc4" in clients and len(recent_thread_messages) >= 2:
-                    try:
-                        lang_mode = detect_language_mode(recent_thread_messages)
-                        ai_prompt = get_account4_system_prompt(topic, recent_thread_messages, lang_mode)
-                        ai_resp = None
-                        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
-                            try:
-                                ai_resp = await gemini_client.aio.models.generate_content(model=m_name, contents=ai_prompt)
-                                if ai_resp and ai_resp.text:
-                                    break
-                            except Exception:
-                                continue
-                        if ai_resp and ai_resp.text:
-                            ai_text = ai_resp.text.strip().replace('"', '')
-                            acc4_client = clients["acc4"]["client"]
-                            acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                            await simulate_typing(acc4_client, acc4_entity, ai_text)
-                            ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=sent_msg.id)
-                            logging.info(f"[Account 4 (Bot)] AI Joined ({lang_mode}): {ai_text}")
-                            total_messages_sent += 1
-                            recent_thread_messages.append(f"Account 4: {ai_text}")
-                            if delete_delay > 0:
-                                asyncio.create_task(delete_message_later(acc4_client, entity.id, ai_sent_msg.id, delete_delay))
-                    except Exception as ai_e:
-                        logging.warning(f"Account 4 AI participation error: {ai_e}")
+                    asyncio.create_task(trigger_acc4_ai_reaction(entity, sent_msg.id, list(recent_thread_messages), topic))
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
                 current_csv_index = csv_index
                 if csv_index % 50 == 0:
                     asyncio.create_task(save_state_to_telegram(csv_index))
             except FloodWaitError as e:
+                cached_entities.pop(chosen_key, None)
                 logging.warning(f"[{name}] Rate limited! Pausing this account for {e.seconds}s")
                 rate_limited_until[chosen_key] = current_time + e.seconds
                 try:
@@ -1069,21 +1090,24 @@ async def chat_loop():
                 except: pass
                 continue
             except ConnectionError as e:
+                cached_entities.pop(chosen_key, None)
                 logging.error(f"Connection dropped! Pausing for 5s to reconnect: {e}")
                 await asyncio.sleep(5)
             except Exception as e:
+                cached_entities.pop(chosen_key, None)
                 logging.error(f"Error sending message: {e}")
                 await asyncio.sleep(3)
                 
             # Realistic variable pacing:
-            # - If same speaker sends 2 consecutive lines: fast burst (2.0s - 3.5s)
-            # - If different speakers: natural pacing with subtle jitter
+            # - If same speaker sends 2 consecutive lines: fast burst scaled to message_speed
+            # - If different speakers: accurate cadence centered around message_speed
             elapsed = time.time() - loop_start
             if is_same_speaker:
-                sleep_duration = random.uniform(2.0, 3.5)
+                burst_target = min(message_speed * 0.4, 2.0)
+                sleep_duration = max(0.3, burst_target - elapsed)
             else:
-                jitter = random.uniform(0.85, 1.15)
-                sleep_duration = max(1.5, (message_speed * jitter) - elapsed)
+                target_interval = message_speed * random.uniform(0.95, 1.05)
+                sleep_duration = max(0.2, target_interval - elapsed)
                 
             await asyncio.sleep(sleep_duration)
         else:
