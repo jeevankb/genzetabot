@@ -124,7 +124,8 @@ message_speed = 15
 delete_delay = int(os.getenv("DELETE_DELAY", 900))  # Default 15 minutes (changeable anytime by User 1 via /setdelete)
 total_messages_sent = 0
 clients = {}
-OUR_USER_IDS = {5429173364}
+ADMIN_USER_IDS = {5429173364, 8877720410}  # User 1 & mrfool (8877720410)
+OUR_USER_IDS = {5429173364}  # User IDs of automated accounts (acc1, acc2, acc3, acc4)
 STATE_MSG_ID = None
 current_csv_index = 0
 
@@ -389,17 +390,24 @@ async def handle_spawn_message(event):
                 "Respond ONLY with the character's exact canonical English name (for example 'Lain Iwakura', 'Toph Beifong', 'Ruan Mei', 'Naruto Uzumaki', 'Lumine'). "
                 "Do NOT include anime title, commentary, markdown, or punctuation. ONLY the character name."
             )
-            try:
-                res = await gemini_client.aio.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[img, prompt]
-                )
-            except Exception as aio_err:
-                logging.warning(f"[Auto-Catcher] Async Gemini Vision failed ({aio_err}). Trying sync call...")
-                res = gemini_client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[img, prompt]
-                )
+            for m_vision in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
+                try:
+                    res = await gemini_client.aio.models.generate_content(
+                        model=m_vision,
+                        contents=[img, prompt]
+                    )
+                    if res and res.text:
+                        break
+                except Exception:
+                    try:
+                        res = gemini_client.models.generate_content(
+                            model=m_vision,
+                            contents=[img, prompt]
+                        )
+                        if res and res.text:
+                            break
+                    except Exception:
+                        continue
             if res and res.text:
                 char_name = res.text.strip().replace('\n', '').strip('".*')
                 logging.info(f"🎯 [Auto-Catcher] GEMINI VISION IDENTIFIED: '{char_name}'")
@@ -469,9 +477,9 @@ def setup_commands(bot_client):
             if not s_id:
                 s = getattr(event, 'message', None)
                 s_id = getattr(getattr(s, 'from_id', None), 'user_id', None)
-            if s_id == accounts["acc1"]["user_id"]:
+            if s_id in ADMIN_USER_IDS:
                 return True
-            if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me"):
+            if event.is_private and (event.chat_id in ADMIN_USER_IDS or event.chat_id == "me"):
                 return True
         except: pass
         return False
@@ -686,24 +694,117 @@ def setup_commands(bot_client):
     async def auto_delete_handler(event):
         if should_skip(): return
         global BOT_ENTITY
-        if not event.is_group and not event.is_channel:
+        
+        # Skip outgoing messages from this bot
+        if getattr(event, 'out', False):
             return
-        if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
-            return
-        BOT_ENTITY = event.input_chat
-        if event.raw_text and event.raw_text.lower().startswith((
+
+        # Skip admin commands so they are processed exclusively by their dedicated command handlers
+        if event.raw_text and event.raw_text.strip().lower().startswith((
             "/lockon", "lockon", "/lockoff", "lockoff",
             "/setdelete", "setdelete", "/autodelete", "autodelete", "/setdel", "setdel", "/delete", "delete",
             "/setspeed", "setspeed", "/speed", "speed",
-            "/stats", "stats", "/arise", "arise", "/day", "day", "/setday", "setday"
+            "/stats", "stats", "/arise", "arise", "/day", "day", "/setday", "setday",
+            "/ariseon", "ariseon", "/ariseoff", "ariseoff", "/arisehere", "arisehere", "/lockarise", "lockarise"
         )):
             return
+
+        is_group_msg = (event.is_group or event.is_channel)
+        is_private_msg = event.is_private
+
+        if not is_group_msg and not is_private_msg:
+            return
+
+        if is_group_msg:
+            if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
+                return
+            BOT_ENTITY = event.input_chat
             
         try:
             sender_id = event.sender_id
-            if not sender_id: return
-            
-            # If one of our bots/accounts speaks
+            if not sender_id:
+                s = getattr(event, 'message', None)
+                sender_id = getattr(getattr(s, 'from_id', None), 'user_id', None)
+            if not sender_id:
+                return
+
+            raw_text = (event.raw_text or "").strip()
+            msg_text = raw_text.lower()
+            if not raw_text:
+                return
+
+            # Check if this message is addressing GunYamazaki (@genzetabot)
+            is_reply_to_our_bot = False
+            if event.message.is_reply:
+                try:
+                    reply_msg = await event.message.get_reply_message()
+                    if reply_msg and (reply_msg.sender_id in OUR_USER_IDS or reply_msg.sender_id == getattr(bot_client, '_self_id', None)):
+                        is_reply_to_our_bot = True
+                except:
+                    pass
+
+            is_gun_mention = bool(re.search(r'(?i)(@genzetabot|\bgun\b|\byamazaki\b|gunyamazaki)', msg_text))
+
+            # -----------------------------------------------------------------
+            # 24/7 AI CONVERSATION (Works EVEN WHEN lockoff is active!)
+            # GunYamazaki replies if:
+            # 1. User sends a private DM to the bot
+            # 2. User replies to GunYamazaki or any of our accounts in group
+            # 3. User mentions or tags Gun (@genzetabot, gun, yamazaki)
+            # -----------------------------------------------------------------
+            if is_private_msg or is_reply_to_our_bot or is_gun_mention:
+                if HAS_GENAI:
+                    try:
+                        lang_mode = detect_language_mode([raw_text])
+                        lang_note = "in casual Hinglish (Roman Hindi + English, e.g. 'hn bhai kya hua', 'sahi h')" if lang_mode in ('hinglish', 'hindi_roman') else "in casual English"
+                        prompt = (
+                            f"You are Gun Yamazaki (@genzetabot), a witty, chill, casual anime friend on Telegram. "
+                            f"A user said: '{raw_text}'. "
+                            f"Reply casually {lang_note} in 1 short, natural sentence. "
+                            f"No hashtags, no quotes, no robotic assistant tone. Be a real bro."
+                        )
+                        response = None
+                        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
+                            try:
+                                response = await gemini_client.aio.models.generate_content(model=m_name, contents=prompt)
+                                if response and response.text:
+                                    break
+                            except Exception:
+                                continue
+                        if response and response.text:
+                            reply_clean = response.text.strip().replace('"', '').replace('**', '')
+                            if is_private_msg:
+                                await simulate_typing(bot_client, event.chat_id, reply_clean)
+                                await bot_client.send_message(event.chat_id, reply_clean)
+                            else:
+                                reply_acc = clients.get("acc4") or {"client": bot_client}
+                                acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                                asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, reply_clean))
+                            return
+                    except Exception as ai_e:
+                        logging.warning(f"Gun AI direct reply error: {ai_e}")
+                        
+                # Fallback if GenAI fails or unavailable
+                fallback_replies = [
+                    "Haan bhai bolo, kya scene hai?",
+                    "Sahi hai bro, aur batao?",
+                    "Arey haan bhai, sun raha hu!",
+                    "Yo! All good here, tu bata?",
+                    "Chill kar bhai sab badhiya h"
+                ]
+                fallback_text = random.choice(fallback_replies)
+                if is_private_msg:
+                    await simulate_typing(bot_client, event.chat_id, fallback_text)
+                    await bot_client.send_message(event.chat_id, fallback_text)
+                else:
+                    reply_acc = clients.get("acc4") or {"client": bot_client}
+                    acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                    asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, fallback_text))
+                return
+
+            # -----------------------------------------------------------------
+            # IF ONE OF OUR AUTOMATED BOTS SPEAKS IN GROUP (Dataset Loop)
+            # -----------------------------------------------------------------
             if sender_id in OUR_USER_IDS:
                 if random.random() < 0.15:
                     try:
@@ -718,14 +819,18 @@ def setup_commands(bot_client):
                             ))
                     except: pass
                 return
-                
-            # If a human speaks
-            if delete_delay > 0:
+
+            # -----------------------------------------------------------------
+            # HUMAN GROUP MEMBER CHATTER
+            # -----------------------------------------------------------------
+            # Auto-delete human message if timer active (and user is not an admin)
+            if delete_delay > 0 and sender_id not in ADMIN_USER_IDS:
                 asyncio.create_task(delete_other_message(event.message, delete_delay))
-                
-            msg_text = event.raw_text.lower() if event.raw_text else ""
-            if not msg_text: return
-            
+
+            # Only execute ambient keyword replies/reactions if bot conversation loop is active
+            if not bot_active:
+                return
+
             entity = event.input_chat
 
             # Emoji Reaction (20% chance)
@@ -746,68 +851,23 @@ def setup_commands(bot_client):
                             reaction=[ReactionEmoji(emoticon=emoji)]
                         ))
                 except: pass
-                    
-            # AI Reply to Human
-            is_reply_to_bot = False
-            if event.message.is_reply:
-                try:
-                    reply_msg = await event.message.get_reply_message()
-                    if reply_msg and reply_msg.sender_id in OUR_USER_IDS:
-                        is_reply_to_bot = True
-                except: pass
-                        
-                if is_reply_to_bot and HAS_GENAI:
-                    try:
-                        lang_mode = detect_language_mode([event.raw_text or ""])
-                        lang_note = "in casual Hinglish (Roman Hindi + English, e.g. 'hn bhai kya hua', 'sahi h')" if lang_mode in ('hinglish', 'hindi_roman') else "in casual English"
-                        prompt = f"You are chatting in a Telegram group with friends. A user replied to you: '{event.raw_text}'. Reply casually {lang_note} in 1 short sentence. No hashtags, no quotes."
-                        response = None
-                        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
-                            try:
-                                response = await gemini_client.aio.models.generate_content(model=m_name, contents=prompt)
-                                if response and response.text: break
-                            except Exception: continue
-                        if response and response.text:
-                            asyncio.create_task(send_dynamic_reply(bot_client, entity, event.message, response.text.strip().replace('"', '')))
-                            return
-                    except: pass
 
-                # Keyword Response
-                keyword_replies = {
-                    r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
-                    r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
-                    r'\b(anime|manga)\b': ["I love anime!", "Konsa anime dekh raha h abhi?"]
-                }
-                
-                responded = False
-                for pattern, replies in keyword_replies.items():
-                    if re.search(pattern, msg_text):
-                        reply_acc = random.choice([clients["acc1"], clients["acc2"], clients["acc3"]])
+            # Keyword ambient response
+            keyword_replies = {
+                r'\b(hi|hello|hey|sup)\b': ["Hey there!", "Hi!", "Hello!"],
+                r'\b(bye|cya|gn)\b': ["See ya!", "Bye!"],
+                r'\b(anime|manga)\b': ["I love anime!", "Konsa anime dekh raha h abhi?"]
+            }
+            for pattern, replies in keyword_replies.items():
+                if re.search(pattern, msg_text):
+                    candidates = [c for k, c in clients.items() if k in ("acc1", "acc2", "acc3")]
+                    if candidates:
+                        reply_acc = random.choice(candidates)
                         reply_text = random.choice(replies)
                         asyncio.create_task(send_dynamic_reply(reply_acc["client"], entity, event.message, reply_text))
-                        responded = True
-                        break
-                        
-                if not responded and HAS_GENAI:
-                    # WAKE WORD: Only respond if the human mentions "gun"
-                    if re.search(r'\bgun\b', msg_text):
-                        try:
-                            lang_mode = detect_language_mode([msg_text])
-                            lang_note = "in casual Hinglish (Roman Hindi + English)" if lang_mode in ('hinglish', 'hindi_roman') else "in casual English"
-                            prompt = f"You are Gun, a casual friend in a Telegram group. Keep your response very short (1 sentence), natural, lowercase {lang_note}. Reply to: {msg_text}"
-                            response = None
-                            for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
-                                try:
-                                    response = await gemini_client.aio.models.generate_content(model=m_name, contents=prompt)
-                                    if response and response.text: break
-                                except Exception: continue
-                            if response and response.text:
-                                if "acc4" in clients:
-                                    reply_acc = clients["acc4"]
-                                    acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await reply_acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                                    asyncio.create_task(send_dynamic_reply(reply_acc["client"], acc4_entity, event.message, response.text.strip().replace('"', '')))
-                        except: pass
-        except: pass
+                    break
+        except Exception as e:
+            logging.error(f"Error in auto_delete_handler: {e}")
 
 async def trigger_anime_news_event(entity):
     global total_messages_sent
@@ -824,7 +884,7 @@ async def trigger_anime_news_event(entity):
             f"Do not use hashtags or quotes."
         )
         news_text = None
-        for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+        for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
             try:
                 resp_news = await gemini_client.aio.models.generate_content(model=m, contents=prompt_news)
                 if resp_news and resp_news.text:
@@ -863,7 +923,7 @@ async def trigger_anime_news_event(entity):
                 f"Give a short 1-sentence reply in natural casual Hinglish (e.g. 'hn kal hi dekha maine', 'ruk spoiler mat dena', 'sahi me')."
             )
             reply_text = None
-            for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+            for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
                 try:
                     resp_reply = await gemini_client.aio.models.generate_content(model=m, contents=prompt_reply)
                     if resp_reply and resp_reply.text:
@@ -898,7 +958,7 @@ async def trigger_poll_event(entity):
             "Format exactly: Question | Option 1 | Option 2 | Option 3"
         )
         text = None
-        for m in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+        for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
             try:
                 response = await gemini_client.aio.models.generate_content(model=m, contents=prompt)
                 if response and response.text:
@@ -946,7 +1006,7 @@ async def trigger_acc4_ai_reaction(target_entity, reply_to_msg_id, thread_contex
         lang_mode = detect_language_mode(thread_context)
         ai_prompt = get_account4_system_prompt(topic_name, thread_context, lang_mode)
         ai_resp = None
-        for m_name in ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-1.5-flash"]:
             try:
                 ai_resp = await gemini_client.aio.models.generate_content(model=m_name, contents=ai_prompt)
                 if ai_resp and ai_resp.text:
@@ -975,7 +1035,7 @@ async def chat_loop():
         load_csv()
     current_csv_index = csv_index
     logging.info(f"Resuming conversation from CSV index {csv_index} (Day: {active_day_name.capitalize()}, Dataset: {CSV_FILE})")
-    active_keys = [k for k in clients.keys() if k != "acc4"]
+    active_keys = list(clients.keys())
     message_tracker = {}
     rate_limited_until = {}
     cached_entities = {}
@@ -1044,7 +1104,10 @@ async def chat_loop():
             
             try:
                 if chosen_key not in cached_entities:
-                    cached_entities[chosen_key] = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                    if chosen_key == "acc4" and (BOT_ENTITY or TARGET_INPUT_PEER):
+                        cached_entities[chosen_key] = BOT_ENTITY or TARGET_INPUT_PEER
+                    else:
+                        cached_entities[chosen_key] = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                 entity = cached_entities[chosen_key]
                 
                 # 3% chance for Account 4 to trigger live Seasonal anime news (non-blocking)
@@ -1079,7 +1142,10 @@ async def chat_loop():
                     
                 await simulate_typing(client, entity, msg_text)
                 
-                sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
+                try:
+                    sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
+                except Exception:
+                    sent_msg = await client.send_message(entity, msg_text)
                 logging.info(f"[{name}] ({topic}): {msg_text}")
                 
                 total_messages_sent += 1
@@ -1095,8 +1161,8 @@ async def chat_loop():
                 if delete_delay > 0:
                     asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
                     
-                # Account 4 AI Context-Aware Participation (5% chance, non-blocking background task)
-                if HAS_GENAI and random.random() < 0.05 and "acc4" in clients and len(recent_thread_messages) >= 2:
+                # Account 4 AI Context-Aware Participation (10% chance, non-blocking background task)
+                if HAS_GENAI and random.random() < 0.10 and "acc4" in clients and len(recent_thread_messages) >= 2:
                     asyncio.create_task(trigger_acc4_ai_reaction(entity, sent_msg.id, list(recent_thread_messages), topic))
                 
                 csv_index = (csv_index + 1) % len(conversation_data)
@@ -1339,10 +1405,10 @@ async def main():
         
     if "acc1" in clients:
         acc1_c = clients["acc1"]["client"]
-        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
+        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/?(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
         async def acc1_saved_setdelete(event):
             try:
-                if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) == accounts["acc1"]["user_id"])):
+                if event.is_private and (event.chat_id in ADMIN_USER_IDS or event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) in ADMIN_USER_IDS)):
                     global delete_delay
                     arg = event.pattern_match.group(1)
                     if not arg or not arg.strip():
@@ -1363,7 +1429,7 @@ async def main():
                         delete_delay = del_val
                         readable = format_seconds_to_readable(delete_delay)
                         await save_state_to_telegram()
-                        await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by User 1! (Saved)")
+                        await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by Admin! (Saved)")
                         try:
                             target = TARGET_CHAT_ID or TARGET_CHAT
                             if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
@@ -1376,16 +1442,16 @@ async def main():
             except Exception as e:
                 logging.error(f"Error in acc1_saved_setdelete: {e}")
 
-        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
+        @acc1_c.on(events.NewMessage(pattern=r'(?i)^/?(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
         async def acc1_saved_setspeed(event):
             try:
-                if event.is_private and (event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) == accounts["acc1"]["user_id"])):
+                if event.is_private and (event.chat_id in ADMIN_USER_IDS or event.chat_id == accounts["acc1"]["user_id"] or event.chat_id == "me" or (getattr(event, 'out', False) and getattr(event.message, 'peer_id', None) and getattr(event.message.peer_id, 'user_id', None) in ADMIN_USER_IDS)):
                     global message_speed
                     arg = event.pattern_match.group(1)
                     if not arg or not arg.strip():
                         await event.reply(
                             f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
-                            f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
+                            f"All accounts (**Account 1, Account 2, Account 3, Account 4**) follow this speed.\n"
                             f"To change, send: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 15s`, or `/setspeed 30s`."
                         )
                         return
@@ -1395,7 +1461,7 @@ async def main():
                         await save_state_to_telegram()
                         await event.reply(
                             f"⚡ **Speed Updated for ALL Accounts!**\n\n"
-                            f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
+                            f"Every account (**Account 1, Account 2, Account 3, Account 4**) will now send 1 message every **{message_speed} seconds**."
                         )
                     else:
                         await event.reply("❌ Invalid speed! Example: `/setspeed 5s`, `/setspeed 10s`, or `/setspeed 15s`.")
