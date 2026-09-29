@@ -632,7 +632,7 @@ def setup_commands(bot_client):
                 if not arg or not arg.strip():
                     await event.reply(
                         f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
-                        f"All accounts (**Account 1, Account 2, Account 3**) follow this speed.\n"
+                        f"All accounts (**Account 1, Account 2, Account 3, GunYamazaki**) follow this speed.\n"
                         f"To change, send: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 15s`, or `/setspeed 30s`."
                     )
                     return
@@ -642,7 +642,7 @@ def setup_commands(bot_client):
                     await save_state_to_telegram()
                     await event.reply(
                         f"⚡ **Speed Updated for ALL Accounts!**\n\n"
-                        f"Every account (**Account 1, Account 2, Account 3**) will now send 1 message every **{message_speed} seconds**."
+                        f"Every account (**Account 1, Account 2, Account 3, GunYamazaki**) will now send 1 message every **{message_speed} seconds**."
                     )
                 else:
                     await event.reply("❌ Invalid speed! Example: `/setspeed 5s`, `/setspeed 10s`, or `/setspeed 15s`.")
@@ -904,7 +904,7 @@ async def trigger_anime_news_event(entity):
         logging.info(f"[Account 4] SEASONAL HINGLISH: {news_text}")
         total_messages_sent += 1
         if delete_delay > 0:
-            asyncio.create_task(delete_message_later(acc4, entity.id, news_msg.id, delete_delay))
+            asyncio.create_task(delete_message_later(acc4, entity, news_msg.id, delete_delay))
             
         await asyncio.sleep(random.uniform(3.0, 6.0))
         
@@ -941,7 +941,7 @@ async def trigger_anime_news_event(entity):
             logging.info(f"[{acc['name']}] REACTS: {reply_text}")
             total_messages_sent += 1
             if delete_delay > 0:
-                asyncio.create_task(delete_message_later(acc["client"], entity.id, reply_msg.id, delete_delay))
+                asyncio.create_task(delete_message_later(acc["client"], entity, reply_msg.id, delete_delay))
                 
             await asyncio.sleep(random.uniform(2.5, 5.0))
             
@@ -993,7 +993,7 @@ async def trigger_poll_event(entity):
         total_messages_sent += 1
         
         if delete_delay > 0:
-            asyncio.create_task(delete_message_later(acc4, entity.id, poll_msg.id, max(delete_delay, 120)))
+            asyncio.create_task(delete_message_later(acc4, entity, poll_msg.id, max(delete_delay, 120)))
             
     except Exception as e:
         logging.error(f"Poll Event Failed: {e}")
@@ -1023,7 +1023,7 @@ async def trigger_acc4_ai_reaction(target_entity, reply_to_msg_id, thread_contex
             total_messages_sent += 1
             thread_context.append(f"Account 4: {ai_text}")
             if delete_delay > 0:
-                asyncio.create_task(delete_message_later(acc4_client, target_entity.id, ai_sent_msg.id, delete_delay))
+                asyncio.create_task(delete_message_later(acc4_client, target_entity, ai_sent_msg.id, delete_delay))
     except Exception as ai_e:
         logging.warning(f"Account 4 AI participation error: {ai_e}")
 
@@ -1130,7 +1130,7 @@ async def chat_loop():
                     logging.info(f"[{name}] Sent Animated Sticker: {emoji_sticker}")
                     total_messages_sent += 1
                     if delete_delay > 0:
-                        asyncio.create_task(delete_message_later(client, entity.id, sent_sticker.id, delete_delay))
+                        asyncio.create_task(delete_message_later(client, entity, sent_sticker.id, delete_delay))
                 
                 # Find reply_to message id in active group
                 reply_msg_id = None
@@ -1146,29 +1146,34 @@ async def chat_loop():
                     sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
                 except Exception:
                     sent_msg = await client.send_message(entity, msg_text)
-                logging.info(f"[{name}] ({topic}): {msg_text}")
                 
-                total_messages_sent += 1
-                recent_thread_messages.append(f"{name}: {msg_text}")
-                if len(recent_thread_messages) > 6:
-                    recent_thread_messages.pop(0)
-                
-                if csv_id:
-                    message_tracker[csv_id] = sent_msg.id
-                    if len(message_tracker) > 1000:
-                        message_tracker.pop(next(iter(message_tracker)))
-                
-                if delete_delay > 0:
-                    asyncio.create_task(delete_message_later(client, entity.id, sent_msg.id, delete_delay))
-                    
-                # Account 4 AI Context-Aware Participation (10% chance, non-blocking background task)
-                if HAS_GENAI and random.random() < 0.10 and "acc4" in clients and len(recent_thread_messages) >= 2:
-                    asyncio.create_task(trigger_acc4_ai_reaction(entity, sent_msg.id, list(recent_thread_messages), topic))
-                
+                # IMMEDIATELY advance csv_index right here so no secondary error can cause repeats!
                 csv_index = (csv_index + 1) % len(conversation_data)
                 current_csv_index = csv_index
-                if csv_index % 50 == 0:
-                    asyncio.create_task(save_state_to_telegram(csv_index))
+                total_messages_sent += 1
+                
+                try:
+                    logging.info(f"[{name}] ({topic}): {msg_text}")
+                    recent_thread_messages.append(f"{name}: {msg_text}")
+                    if len(recent_thread_messages) > 6:
+                        recent_thread_messages.pop(0)
+                    
+                    if csv_id:
+                        message_tracker[csv_id] = sent_msg.id
+                        if len(message_tracker) > 1000:
+                            message_tracker.pop(next(iter(message_tracker)))
+                    
+                    if delete_delay > 0:
+                        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, delete_delay))
+                        
+                    # Account 4 AI Context-Aware Participation (10% chance, non-blocking background task)
+                    if HAS_GENAI and random.random() < 0.10 and "acc4" in clients and len(recent_thread_messages) >= 2:
+                        asyncio.create_task(trigger_acc4_ai_reaction(entity, sent_msg.id, list(recent_thread_messages), topic))
+                    
+                    if csv_index % 50 == 0:
+                        asyncio.create_task(save_state_to_telegram(csv_index))
+                except Exception as post_err:
+                    logging.warning(f"Post-message processing warning: {post_err}")
             except FloodWaitError as e:
                 cached_entities.pop(chosen_key, None)
                 logging.warning(f"[{name}] Rate limited! Pausing this account for {e.seconds}s")
