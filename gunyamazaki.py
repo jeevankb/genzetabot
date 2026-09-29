@@ -66,12 +66,17 @@ accounts = {
     "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
 }
 
-def load_csv(day_name=None):
+IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+def get_ist_day_name():
+    return datetime.datetime.now(IST_TZ).strftime("%A").lower()
+
+def load_csv(day_name=None, shuffle_threads=True):
     global conversation_data, CSV_FILE, active_day_name
     if day_name:
         active_day_name = day_name.lower().strip()
     else:
-        active_day_name = datetime.datetime.now().strftime("%A").lower()
+        active_day_name = get_ist_day_name()
         
     script_dir = os.path.dirname(os.path.abspath(__file__))
     day_csv = f"conversations_{active_day_name}.csv"
@@ -86,11 +91,30 @@ def load_csv(day_name=None):
         
     conversation_data.clear()
     if os.path.exists(csv_path):
+        raw_rows = []
         with open(csv_path, mode="r", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
             for row in reader:
-                conversation_data.append(row)
-        logging.info(f"Loaded {len(conversation_data)} messages from {CSV_FILE} (Day: {active_day_name.capitalize()}).")
+                raw_rows.append(row)
+                
+        if shuffle_threads:
+            # Group rows by conversation_id to preserve intra-thread logical reply chains
+            threads = {}
+            for row in raw_rows:
+                cid = row.get("conversation_id", "default")
+                if cid not in threads:
+                    threads[cid] = []
+                threads[cid].append(row)
+                
+            thread_ids = list(threads.keys())
+            random.shuffle(thread_ids)
+            
+            for cid in thread_ids:
+                conversation_data.extend(threads[cid])
+            logging.info(f"Loaded and thread-shuffled {len(conversation_data)} messages ({len(thread_ids)} threads) from {CSV_FILE} (Day: {active_day_name.capitalize()} IST).")
+        else:
+            conversation_data.extend(raw_rows)
+            logging.info(f"Loaded {len(conversation_data)} messages from {CSV_FILE} (Day: {active_day_name.capitalize()} IST).")
     else:
         logging.error(f"{CSV_FILE} not found in the directory.")
 
@@ -126,22 +150,23 @@ async def load_state_from_telegram():
                         elif p.startswith("day="):
                             saved_day = p.split("=")[1].lower().strip()
                             
-                    today_day = datetime.datetime.now().strftime("%A").lower()
+                    today_day = get_ist_day_name()
                     if saved_day and saved_day != today_day:
-                        logging.info(f"Saved state day ({saved_day}) differs from today ({today_day}). Starting fresh at index 0 for {today_day}.")
+                        logging.info(f"Saved state day ({saved_day}) differs from today ({today_day} IST). Starting fresh at index 0 for {today_day}.")
                         current_csv_index = 0
-                        load_csv(today_day)
+                        load_csv(today_day, shuffle_threads=True)
                     elif saved_day:
                         active_day_name = saved_day
-                        load_csv(active_day_name)
+                        # When resuming mid-day with an existing index, preserve dataset ordering
+                        load_csv(active_day_name, shuffle_threads=False)
                     else:
-                        load_csv(today_day)
+                        load_csv(today_day, shuffle_threads=True)
                     return current_csv_index
                 except: pass
                 break
     except Exception as e:
         logging.error(f"Failed to load state from telegram: {e}")
-    load_csv()
+    load_csv(shuffle_threads=True)
     return 0
 
 async def save_state_to_telegram(csv_idx=None):
@@ -963,11 +988,11 @@ async def chat_loop():
     while True:
         current_time = time.time()
         
-        # Check for midnight day rollover
-        now_day = datetime.datetime.now().strftime("%A").lower()
+        # Check for midnight day rollover (Aligned to IST Indian Timezone)
+        now_day = get_ist_day_name()
         if now_day != last_checked_day:
-            logging.info(f"🕛 [Midnight Rollover] Day changed from {last_checked_day} to {now_day}! Hot-reloading today's dataset...")
-            load_csv(now_day)
+            logging.info(f"🕛 [Midnight Rollover - IST] Day changed from {last_checked_day} to {now_day}! Hot-reloading today's dataset...")
+            load_csv(now_day, shuffle_threads=True)
             csv_index = 0
             current_csv_index = 0
             last_checked_day = now_day
