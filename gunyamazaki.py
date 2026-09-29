@@ -476,7 +476,7 @@ def setup_commands(bot_client):
         except: pass
         return False
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/stats(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?stats(?:@genzetabot)?$'))
     async def stats_handler(event):
         if should_skip(): return
         try:
@@ -498,7 +498,7 @@ def setup_commands(bot_client):
                 )
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:day|dayinfo)(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:day|dayinfo)(?:@genzetabot)?$'))
     async def day_handler(event):
         if should_skip(): return
         try:
@@ -516,7 +516,7 @@ def setup_commands(bot_client):
                 )
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern=r'(?i)^/setday(?:@genzetabot)?(?:\s+(.+))?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
         if should_skip(): return
         global current_csv_index
@@ -543,7 +543,7 @@ def setup_commands(bot_client):
         except Exception as e:
             logging.error(f"Error in setday_handler: {e}")
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/ariseon(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?ariseon(?:@genzetabot)?$'))
     async def ariseon_handler(event):
         if should_skip(): return
         global arise_autocatch_active
@@ -553,7 +553,7 @@ def setup_commands(bot_client):
                 await event.reply(f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/ariseoff(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?ariseoff(?:@genzetabot)?$'))
     async def ariseoff_handler(event):
         if should_skip(): return
         global arise_autocatch_active
@@ -563,7 +563,7 @@ def setup_commands(bot_client):
                 await event.reply("🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/(?:arisehere|lockarise)(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:arisehere|lockarise)(?:@genzetabot)?$'))
     async def arisehere_handler(event):
         if should_skip(): return
         global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE, arise_autocatch_active
@@ -584,7 +584,7 @@ def setup_commands(bot_client):
                 logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/lockon(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         if should_skip(): return
         global bot_active, BOT_ENTITY, TARGET_CHAT_ID, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
@@ -598,27 +598,22 @@ def setup_commands(bot_client):
                     SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
                 except: pass
                 bot_active = True
-                await event.reply(
-                    f"✅ **GunYamazaki System & Auto-Catcher LOCKED ON!**\n\n"
-                    f"Target Group: **{SPAWN_CHAT_TITLE}** (`{TARGET_CHAT_ID}`)\n"
-                    f"Auto-Catch: 🟢 **ONLINE** (Strictly this group only)\n"
-                    f"Conversation Loop: 🟢 **STARTED**"
-                )
+                await event.reply(f"🟢 **Locked On!** ({SPAWN_CHAT_TITLE})")
                 logging.info(f"System & Arise Auto-Catcher LOCKED ON to {TARGET_CHAT_ID} ('{SPAWN_CHAT_TITLE}') by admin.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern='(?i)^/lockoff(?:@genzetabot)?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockoff(?:@genzetabot)?$'))
     async def lockoff_handler(event):
         if should_skip(): return
         global bot_active
         try:
             if is_admin(event):
                 bot_active = False
-                await event.reply("🛑 GunYamazaki System Locked Off. Stopping conversation loop...")
+                await event.reply("🛑 **Locked Off.**")
                 logging.info("System LOCKED OFF by admin.")
         except: pass
 
-    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
         if should_skip(): return
         if not is_acc4 and event.is_private: return
@@ -646,7 +641,7 @@ def setup_commands(bot_client):
         except Exception as e:
             logging.error(f"Error in setspeed_handler: {e}")
 
-    @bot_client.on(events.NewMessage(pattern=r'(?i)^/(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setdelete_handler(event):
         if should_skip(): return
         if not is_acc4 and event.is_private: return
@@ -696,7 +691,12 @@ def setup_commands(bot_client):
         if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
             return
         BOT_ENTITY = event.input_chat
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "/setdelete", "/autodelete", "/setdel", "/delete", "/setspeed", "/speed", "/stats", "/arise", "/day", "/setday")):
+        if event.raw_text and event.raw_text.lower().startswith((
+            "/lockon", "lockon", "/lockoff", "lockoff",
+            "/setdelete", "setdelete", "/autodelete", "autodelete", "/setdel", "setdel", "/delete", "delete",
+            "/setspeed", "setspeed", "/speed", "speed",
+            "/stats", "stats", "/arise", "arise", "/day", "day", "/setday", "setday"
+        )):
             return
             
         try:
