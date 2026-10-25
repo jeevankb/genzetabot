@@ -560,6 +560,9 @@ def setup_commands(bot_client):
     is_acc4 = (bot_client == clients.get("acc4", {}).get("client"))
 
     def should_skip_cmd(event):
+        # Userbot accounts (acc1, acc2, acc3) must NEVER process private DMs!
+        if not is_acc4 and event.is_private:
+            return True
         msg_id = getattr(event.message, 'id', None)
         if not msg_id:
             return False
@@ -570,6 +573,21 @@ def setup_commands(bot_client):
             processed_cmd_msg_ids.clear()
             processed_cmd_msg_ids.add(msg_id)
         return False
+
+    async def send_bot_reply(event, text, file=None):
+        """
+        Always ensures command responses are sent by the official Bot (acc4 / Gun Yamazaki)
+        so user accounts (acc1) NEVER speak or respond on behalf of the bot!
+        """
+        acc4_client = clients.get("acc4", {}).get("client")
+        target_client = acc4_client if (acc4_client and acc4_client.is_connected()) else bot_client
+        try:
+            if file:
+                return await target_client.send_message(event.chat_id, text, file=file, reply_to=event.message.id)
+            else:
+                return await target_client.send_message(event.chat_id, text, reply_to=event.message.id)
+        except Exception:
+            return await event.reply(text, file=file)
 
     def get_sender_id(event):
         s_id = getattr(event, 'sender_id', None)
@@ -604,7 +622,7 @@ def setup_commands(bot_client):
                 catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
                 catch_status = f"🟢 ONLINE (Gemini AI Vision | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
                 day_cap = active_day_name.capitalize()
-                await event.reply(
+                await send_bot_reply(event, 
                     f"📊 **GunYamazaki Stats**\n\n"
                     f"Status: {status}\n"
                     f"Speed: {message_speed}s\n"
@@ -625,7 +643,7 @@ def setup_commands(bot_client):
             if is_super_admin(event):
                 day_cap = active_day_name.capitalize()
                 total_msgs = len(conversation_data)
-                await event.reply(
+                await send_bot_reply(event, 
                     f"📅 **Active Daily Dataset Info**\n\n"
                     f"• **Current Day:** {day_cap}\n"
                     f"• **Active CSV:** `{CSV_FILE}`\n"
@@ -646,13 +664,13 @@ def setup_commands(bot_client):
                 valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
                 if not arg or arg.strip().lower() not in valid_days:
                     days_list = ", ".join(f"`{d}`" for d in valid_days)
-                    await event.reply(f"❌ Please specify a valid day!\nAvailable days: {days_list}\nExample: `setday friday`")
+                    await send_bot_reply(event, f"❌ Please specify a valid day!\nAvailable days: {days_list}\nExample: `setday friday`")
                     return
                 target_day = arg.strip().lower()
                 load_csv(target_day)
                 current_csv_index = 0
                 await save_state_to_telegram(0)
-                await event.reply(
+                await send_bot_reply(event, 
                     f"✅ **Active Day Switched!**\n\n"
                     f"• **New Day:** {target_day.capitalize()}\n"
                     f"• **Loaded CSV:** `{CSV_FILE}`\n"
@@ -670,7 +688,7 @@ def setup_commands(bot_client):
         try:
             if is_super_admin(event):
                 arise_autocatch_active = True
-                await event.reply(f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
+                await send_bot_reply(event, f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?ariseoff(?:@genzetabot)?$'))
@@ -680,7 +698,7 @@ def setup_commands(bot_client):
         try:
             if is_super_admin(event):
                 arise_autocatch_active = False
-                await event.reply("🛑 Arise Auto-Catcher is now **OFFLINE**.")
+                await send_bot_reply(event, "🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:arisehere|lockarise)(?:@genzetabot)?$'))
@@ -695,7 +713,7 @@ def setup_commands(bot_client):
                     chat = await event.get_chat()
                     SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
                 except: pass
-                await event.reply(
+                await send_bot_reply(event, 
                     f"🎯 **Arise Auto-Catcher LOCKED!**\n\n"
                     f"Group: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)\n"
                     f"Status: 🟢 **ONLINE**\n\n"
@@ -718,7 +736,7 @@ def setup_commands(bot_client):
                     SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
                 except: pass
                 bot_active = True
-                await event.reply(f"🟢 **Locked On!** ({SPAWN_CHAT_TITLE})")
+                await send_bot_reply(event, f"🟢 **Locked On!** ({SPAWN_CHAT_TITLE})")
                 logging.info(f"System & Arise Auto-Catcher LOCKED ON to {TARGET_CHAT_ID} ('{SPAWN_CHAT_TITLE}') by admin {get_sender_id(event)}.")
         except: pass
 
@@ -729,7 +747,7 @@ def setup_commands(bot_client):
         try:
             if can_control_lock(event):
                 bot_active = False
-                await event.reply("🛑 **Locked Off.**")
+                await send_bot_reply(event, "🛑 **Locked Off.**")
                 logging.info(f"System LOCKED OFF by admin {get_sender_id(event)}.")
         except: pass
 
@@ -741,7 +759,7 @@ def setup_commands(bot_client):
             if is_super_admin(event):
                 arg = event.pattern_match.group(1)
                 if not arg or not arg.strip():
-                    await event.reply(
+                    await send_bot_reply(event, 
                         f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
                         f"All accounts (**Account 1, Account 2, Account 3, GunYamazaki**) follow this speed.\n"
                         f"To change, send: `setspeed 5s`, `setspeed 10s`, `setspeed 15s`, or `setspeed 30s` (slash optional)."
@@ -751,12 +769,12 @@ def setup_commands(bot_client):
                 if speed_val is not None and speed_val > 0:
                     message_speed = int(speed_val)
                     await save_state_to_telegram()
-                    await event.reply(
+                    await send_bot_reply(event, 
                         f"⚡ **Speed Updated for ALL Accounts!**\n\n"
                         f"Every account (**Account 1, Account 2, Account 3, GunYamazaki**) will now send 1 message every **{message_speed} seconds**."
                     )
                 else:
-                    await event.reply("❌ Invalid speed! Example: `setspeed 5s`, `setspeed 10s`, or `setspeed 15s`.")
+                    await send_bot_reply(event, "❌ Invalid speed! Example: `setspeed 5s`, `setspeed 10s`, or `setspeed 15s`.")
         except Exception as e:
             logging.error(f"Error in setspeed_handler: {e}")
 
@@ -769,7 +787,7 @@ def setup_commands(bot_client):
                 arg = event.pattern_match.group(1)
                 if not arg or not arg.strip():
                     readable = format_seconds_to_readable(delete_delay)
-                    await event.reply(
+                    await send_bot_reply(event, 
                         f"🗑 **Current Auto-Delete:** **{readable}** ({delete_delay}s)\n\n"
                         f"Super Admin can set this to any duration anytime:\n"
                         f"• `setdelete 15m` (15 minutes)\n"
@@ -786,7 +804,7 @@ def setup_commands(bot_client):
                     delete_delay = del_val
                     readable = format_seconds_to_readable(delete_delay)
                     await save_state_to_telegram()
-                    await event.reply(f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by Super Admin! Starting sweep...")
+                    await send_bot_reply(event, f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by Super Admin! Starting sweep...")
                     try:
                         sweep_client = bot_client if bot_client.is_connected() else clients.get("acc1", {}).get("client")
                         target = TARGET_CHAT_ID or TARGET_CHAT
@@ -796,7 +814,7 @@ def setup_commands(bot_client):
                         asyncio.create_task(history_sweeper(sweep_client, entity, delete_delay))
                     except: pass
                 else:
-                    await event.reply("❌ Invalid time format! Example: `setdelete 15m`, `setdelete 1h`, `setdelete 7days`, or `setdelete 0`.")
+                    await send_bot_reply(event, "❌ Invalid time format! Example: `setdelete 15m`, `setdelete 1h`, `setdelete 7days`, or `setdelete 0`.")
         except Exception as e:
             logging.error(f"Error in setdelete_handler: {e}")
 
@@ -818,9 +836,10 @@ def setup_commands(bot_client):
             if not caption:
                 caption = f"⚡ {meme_title} ⚡\n{punchline}"
                 
-            sent_msg = await event.reply(caption, file=fpath)
+            sent_msg = await send_bot_reply(event, caption, file=fpath)
             if delete_delay > 0 and not event.is_private:
-                asyncio.create_task(delete_message_later(bot_client, event.chat_id, sent_msg.id, delete_delay))
+                target_del_client = clients.get("acc4", {}).get("client") or bot_client
+                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, delete_delay))
         except Exception as e:
             logging.error(f"Error in meme_cmd_handler: {e}")
 
@@ -842,9 +861,12 @@ def setup_commands(bot_client):
             if not response:
                 response = f"🌐 **Live {cat.capitalize()} News:**\n{headline}"
                 
-            sent_msg = await event.reply(response)
+            sent_msg = await send_bot_reply(event, response)
             if delete_delay > 0 and not event.is_private:
-                asyncio.create_task(delete_message_later(bot_client, event.chat_id, sent_msg.id, delete_delay))
+                target_del_client = clients.get("acc4", {}).get("client") or bot_client
+                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, delete_delay))
+        except Exception as e:
+            logging.error(f"Error in news_cmd_handler: {e}")
         except Exception as e:
             logging.error(f"Error in news_cmd_handler: {e}")
 
@@ -869,6 +891,11 @@ def setup_commands(bot_client):
 
         is_group_msg = (event.is_group or event.is_channel)
         is_private_msg = event.is_private
+
+        # CRITICAL: User accounts (acc1, acc2, acc3) must NEVER touch or auto-reply to private DMs!
+        # Private DMs must be handled strictly and exclusively by acc4 (the official Bot).
+        if not is_acc4 and is_private_msg:
+            return
 
         if not is_group_msg and not is_private_msg:
             return
@@ -966,9 +993,10 @@ def setup_commands(bot_client):
 
             # Choose which account will speak
             if is_private_msg:
-                speaker_client = bot_client
-                speaker_name = "Gun Yamazaki"
-                chosen_client_cfg = {"client": bot_client, "name": "Gun Yamazaki"}
+                # Private DMs are strictly handled and spoken by acc4 (Gun Yamazaki Bot)
+                chosen_client_cfg = clients.get("acc4") or {"client": bot_client, "name": "Gun Yamazaki"}
+                speaker_client = chosen_client_cfg["client"]
+                speaker_name = chosen_client_cfg["name"]
             elif is_gun_mention:
                 chosen_client_cfg = clients.get("acc4") or {"client": bot_client, "name": "Gun Yamazaki"}
                 speaker_client = chosen_client_cfg["client"]
@@ -1019,8 +1047,9 @@ def setup_commands(bot_client):
             recent_chat_history.append(f"{speaker_name}: {reply_clean}")
 
             if is_private_msg:
-                await simulate_typing(bot_client, event.chat_id, reply_clean)
-                await bot_client.send_message(event.chat_id, reply_clean)
+                acc4_client = clients.get("acc4", {}).get("client") or bot_client
+                await simulate_typing(acc4_client, event.chat_id, reply_clean)
+                await acc4_client.send_message(event.chat_id, reply_clean)
             else:
                 target_chat_peer = BOT_ENTITY or TARGET_INPUT_PEER or await speaker_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                 asyncio.create_task(send_dynamic_reply(speaker_client, target_chat_peer, event.message, reply_clean))
