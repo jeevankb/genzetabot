@@ -84,7 +84,6 @@ AI_VISION_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 # Conversation Tracking & Anti-Repetition State
 recent_chat_history = collections.deque(maxlen=15)
 recent_ai_replies = collections.deque(maxlen=30)
-csv_paused_until = 0.0
 last_human_reply_time = 0.0
 processed_human_msg_ids = set()
 
@@ -314,8 +313,8 @@ class GroupState:
     message_tracker: dict = field(default_factory=dict)
     rate_limited_until: dict = field(default_factory=dict)
     last_voice_time: float = 0.0       # Cooldown for voice notes in this group
-    voice_cooldown: float = 900.0      # Automated voice cooldown (default: 900s / 15m)
-    voice_probability: float = 0.025   # Automated voice drop probability (default: 2.5%)
+    voice_cooldown: float = 180.0      # Automated voice cooldown (default: 180s / 3m)
+    voice_probability: float = 0.08    # Automated voice drop probability (default: 8%)
     is_loop_running: bool = False
     state_msg_id: int = None
     # Group-isolated conversation history (multi-turn memory)
@@ -684,14 +683,10 @@ async def periodic_history_sweeper():
             logging.error(f"Periodic sweeper error: {e}")
 
 async def simulate_typing(client, entity, text, group_speed=15.0):
-    if group_speed <= 1.0:
-        return
     if group_speed <= 5.0:
-        max_type = min(max(group_speed * 0.15, 0.3), 0.8)
-        typing_time = min(max(len(text) * 0.015, 0.25), max_type)
-    else:
-        max_type = min(max(group_speed * 0.25, 0.5), 2.5)
-        typing_time = min(max(len(text) * 0.025, 0.4), max_type)
+        return
+    max_type = min(max(group_speed * 0.25, 0.5), 2.5)
+    typing_time = min(max(len(text) * 0.025, 0.4), max_type)
     try:
         async with client.action(entity, 'typing'):
             await asyncio.sleep(typing_time)
@@ -1427,11 +1422,8 @@ def setup_commands(bot_client):
                 try:
                     reply_msg = await event.message.get_reply_message()
                     if reply_msg:
-                        for acc_k, acc_v in clients.items():
-                            if reply_msg.sender_id == acc_v.get("user_id"):
-                                is_reply_to_our_bot = True
-                                break
-                        if not is_reply_to_our_bot and (reply_msg.sender_id in OUR_USER_IDS or reply_msg.sender_id == getattr(bot_client, '_self_id', None)):
+                        bot_uid = clients.get("acc4", {}).get("user_id") or getattr(bot_client, '_self_id', None)
+                        if bot_uid and reply_msg.sender_id == bot_uid:
                             is_reply_to_our_bot = True
                 except: pass
 
@@ -1495,9 +1487,6 @@ def setup_commands(bot_client):
             # CRITICAL: Replies to humans MUST come strictly through acc4 (the Bot)!
             if not is_acc4:
                 return
-
-            # Pause scripted dataset playback for 30s so human conversation can flow
-            globals()['csv_paused_until'] = time.time() + 30.0
 
             # Debounce quick consecutive messages
             now = time.time()
@@ -1880,10 +1869,6 @@ async def run_group_chat_loop(chat_id: int):
             await register_and_warmup_group(chat_id)
             await asyncio.sleep(3)
             continue
-            
-        if current_time < csv_paused_until:
-            await asyncio.sleep(1.5)
-            continue
 
         loop_start = time.time()
         msg_data = conversation_data[state.csv_index]
@@ -1905,8 +1890,9 @@ async def run_group_chat_loop(chat_id: int):
         # so that the Bot (acc4) and user accounts talk completely equally like friends!
         if conv_id and conv_id != state.last_conv_id:
             state.recent_thread_messages.clear()
-            thread_pause = min(random.uniform(2.0, 5.0), state.speed * 0.7)
-            await asyncio.sleep(thread_pause)
+            if state.speed > 10.0:
+                thread_pause = min(random.uniform(2.0, 5.0), state.speed * 0.7)
+                await asyncio.sleep(thread_pause)
             if available_workers:
                 shuffled = random.sample(available_workers, len(available_workers))
                 csv_roles = ["acc1", "acc2", "acc3"]
@@ -2031,9 +2017,11 @@ async def run_group_chat_loop(chat_id: int):
             await asyncio.sleep(3)
             
         elapsed = time.time() - loop_start
-        if is_same_speaker:
+        if state.speed <= 5.0:
+            sleep_duration = max(0.05, state.speed - elapsed)
+        elif is_same_speaker:
             burst_target = min(state.speed * 0.4, 2.0)
-            sleep_duration = max(0.3, burst_target - elapsed)
+            sleep_duration = max(0.2, burst_target - elapsed)
         else:
             target_interval = state.speed * random.uniform(0.95, 1.05)
             sleep_duration = max(0.2, target_interval - elapsed)

@@ -242,5 +242,36 @@ class TestAccountPermissions(unittest.TestCase):
         asyncio.run(run_test())
 
 
+class TestSpeedAndWaifuResilience(unittest.TestCase):
+    """
+    Tests high-speed 5s mode and resilience against waifu spawn / game bot freezing.
+    """
+    def test_instant_typing_at_5s_speed(self):
+        import gunyamazaki
+        async def run_test():
+            start = asyncio.get_event_loop().time()
+            # simulate_typing at 5s speed must return immediately (0s delay)
+            await gunyamazaki.simulate_typing(MagicMock(), MagicMock(), "Test text message", group_speed=5.0)
+            elapsed = asyncio.get_event_loop().time() - start
+            self.assertLess(elapsed, 0.05, "simulate_typing at 5s must have 0 delay")
+        asyncio.run(run_test())
+
+    def test_edge_tts_fallback_when_enabled(self):
+        async def run_test():
+            with patch.dict(os.environ, {"ENABLE_EDGE_TTS_FALLBACK": "1", "FISH_AUDIO_API_KEY": ""}):
+                with patch("voice_engine.ENABLE_EDGE_FALLBACK", True):
+                    fp, text = await voice_engine.generate_voice_note("acc1", "Bhai testing edge fallback")
+                    self.assertIsNotNone(fp, "Edge TTS fallback should return file path when enabled")
+                    self.assertTrue(os.path.exists(fp))
+                    if os.path.exists(fp):
+                        try: os.remove(fp)
+                        except: pass
+        asyncio.run(run_test())
+
+    def test_no_csv_paused_until_global(self):
+        import gunyamazaki
+        self.assertFalse(hasattr(gunyamazaki, 'csv_paused_until'), "csv_paused_until global must be removed")
+
+
 if __name__ == "__main__":
     unittest.main()

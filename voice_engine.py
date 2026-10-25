@@ -187,6 +187,53 @@ SAMPLE_VOICE_LINES = {
 
 recent_spoken_lines = []
 
+# ---------------------------------------------------------------------------
+# EDGE-TTS REALISTIC ADULT MALE VOICES (Zero-Downtime High-Fidelity Fallback)
+# ---------------------------------------------------------------------------
+EDGE_VOICE_CONFIGS = {
+    "acc1": {"voice": "hi-IN-MadhurNeural", "rate": "+0%", "pitch": "+0Hz"},
+    "acc2": {"voice": "hi-IN-MadhurNeural", "rate": "-3%", "pitch": "-5Hz"},
+    "acc3": {"voice": "hi-IN-MadhurNeural", "rate": "+8%", "pitch": "+6Hz"},
+    "acc4": {"voice": "hi-IN-MadhurNeural", "rate": "+4%", "pitch": "+2Hz"}
+}
+
+async def generate_edge_tts_voice(account_key: str, spoken_text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Synthesizes speech using Microsoft Edge-TTS with realistic, distinct Indian male voices.
+    Serves as zero-downtime fallback when Fish Audio credits are exhausted (HTTP 402).
+    """
+    import edge_tts
+    cfg = EDGE_VOICE_CONFIGS.get(account_key, EDGE_VOICE_CONFIGS["acc1"])
+    cache_key = audio_cache.make_key("edge", f"{account_key}_{cfg['pitch']}_{cfg['rate']}", spoken_text, "mp3")
+    cached_path = audio_cache.get(cache_key)
+    if cached_path and os.path.exists(cached_path):
+        temp_copy = os.path.join(VOICE_DIR, f"cached_edge_{account_key}_{uuid.uuid4().hex[:6]}.mp3")
+        shutil.copy2(cached_path, temp_copy)
+        logging.info(f"🎙 [VoiceEngine Cache HIT] Reusing cached Edge TTS note for {account_key}")
+        return temp_copy, spoken_text
+
+    filename = f"edge_{account_key}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp3"
+    filepath = os.path.join(VOICE_DIR, filename)
+    try:
+        comm = edge_tts.Communicate(
+            text=spoken_text,
+            voice=cfg["voice"],
+            rate=cfg["rate"],
+            pitch=cfg["pitch"]
+        )
+        await comm.save(filepath)
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 500:
+            with open(filepath, "rb") as f:
+                data = f.read()
+            audio_cache.put(cache_key, data)
+            logging.info(f"🎙 [Edge TTS Fallback] Generated voice note for {ACCOUNT_NAMES.get(account_key, account_key)}: '{spoken_text[:50]}...'")
+            return filepath, spoken_text
+    except Exception as e:
+        logging.warning(f"[VoiceEngine] Edge TTS error for {account_key}: {e}")
+    return None, None
+
+ENABLE_EDGE_FALLBACK = os.getenv("ENABLE_EDGE_TTS_FALLBACK", "0").lower() in ("1", "true", "yes")
+
 def get_voice_mapping_summary() -> dict:
     """Returns the strict account-to-voice configuration mapping."""
     return {
@@ -220,6 +267,8 @@ async def generate_fish_audio_voice(account_key: str, spoken_text: str) -> Tuple
     fish_key = os.getenv("FISH_AUDIO_API_KEY")
     if not fish_key:
         logging.warning(f"[VoiceEngine] Fish Audio API key missing for {account_key}.")
+        if ENABLE_EDGE_FALLBACK:
+            return await generate_edge_tts_voice(account_key, spoken_text)
         return None, None
 
     filename = f"fish_{account_key}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp3"
@@ -253,13 +302,19 @@ async def generate_fish_audio_voice(account_key: str, spoken_text: str) -> Tuple
                         return filepath, spoken_text
                     else:
                         logging.warning(f"[VoiceEngine] Fish Audio returned empty or corrupt audio data for {account_key}.")
+                        if ENABLE_EDGE_FALLBACK:
+                            return await generate_edge_tts_voice(account_key, spoken_text)
                         return None, None
                 else:
                     err_text = await resp.text()
                     logging.warning(f"[VoiceEngine] Fish Audio API error HTTP {resp.status} for {account_key}: {err_text[:120]}")
+                    if ENABLE_EDGE_FALLBACK:
+                        return await generate_edge_tts_voice(account_key, spoken_text)
                     return None, None
     except Exception as e:
         logging.warning(f"[VoiceEngine] Fish Audio request exception for {account_key}: {e}")
+        if ENABLE_EDGE_FALLBACK:
+            return await generate_edge_tts_voice(account_key, spoken_text)
         return None, None
 
 async def generate_bot_voice(spoken_text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -319,13 +374,19 @@ async def generate_bot_voice(spoken_text: str) -> Tuple[Optional[str], Optional[
                         return filepath, spoken_text
                     else:
                         logging.warning("[VoiceEngine] ElevenLabs returned empty audio payload.")
+                        if ENABLE_EDGE_FALLBACK:
+                            return await generate_edge_tts_voice("acc4", spoken_text)
                         return None, None
                 else:
                     err_text = await resp.text()
                     logging.warning(f"[VoiceEngine] ElevenLabs API error HTTP {resp.status}: {err_text[:120]}")
+                    if ENABLE_EDGE_FALLBACK:
+                        return await generate_edge_tts_voice("acc4", spoken_text)
                     return None, None
     except Exception as e:
         logging.warning(f"[VoiceEngine] ElevenLabs request exception for GenzetaBot: {e}")
+        if ENABLE_EDGE_FALLBACK:
+            return await generate_edge_tts_voice("acc4", spoken_text)
         return None, None
 
 async def generate_voice_note(account_key: str, context_text: str = None, category: str = "banter") -> Tuple[Optional[str], Optional[str]]:
