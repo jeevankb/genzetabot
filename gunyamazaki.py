@@ -17,6 +17,7 @@ import collections
 from PIL import Image
 from dataclasses import dataclass, field
 import voice_engine
+import bot_persistence
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -49,7 +50,7 @@ except Exception as ge:
     logging.warning(f"Could not initialize Gemini AI: {ge}")
 
 # Active Working AI Models
-AI_TEXT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+AI_TEXT_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
 AI_VISION_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 
 # Conversation Tracking & Anti-Repetition State
@@ -97,6 +98,57 @@ DYNAMIC_FALLBACKS_ENGLISH = [
     "Listening bro, tell me what happened",
     "Haha you're not wrong, pretty much accurate!"
 ]
+
+
+async def process_voice_note_with_gemini(audio_bytes: bytes, sender_name: str, group_context: str) -> tuple[str, str]:
+    """
+    Multimodal audio processing using Gemini:
+    Transcribes the incoming user voice note and formulates a Jarvis-like witty, helpful response.
+    Returns: (transcription, jarvis_reply)
+    """
+    if not HAS_GENAI or not gemini_client:
+        return "Audio voice message", "Hey! I received your voice note. How can I help you, bro?"
+
+    try:
+        from google.genai import types
+        part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
+        prompt = (
+            f"You are GenzetaBot, a highly capable, witty, sharp, helpful, Jarvis-like AI assistant and loyal companion.\n"
+            f"Recent conversation context in this group:\n{group_context}\n\n"
+            f"A user ({sender_name}) just sent the attached voice note.\n"
+            f"TASK:\n"
+            f"1. Transcribe what the user said in the audio.\n"
+            f"2. Formulate a direct, natural, witty conversational reply to their question or statement in casual Hinglish/English.\n"
+            f"FORMAT:\n"
+            f"TRANSCRIPT: <transcription of user voice note>\n"
+            f"REPLY: <your direct conversational answer to them (1 to 2 sentences, no hashtags, no quotes)>"
+        )
+        for model_name in AI_TEXT_MODELS:
+            try:
+                res = await gemini_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=[part, prompt]
+                )
+                if res and res.text:
+                    text = res.text.strip()
+                    transcript = ""
+                    reply = ""
+                    if "TRANSCRIPT:" in text and "REPLY:" in text:
+                        parts = text.split("REPLY:", 1)
+                        transcript = parts[0].replace("TRANSCRIPT:", "").strip()
+                        reply = parts[1].strip()
+                    elif "REPLY:" in text:
+                        reply = text.replace("REPLY:", "").strip()
+                    else:
+                        reply = text
+                    reply = re.sub(r'^(GenzetaBot|Bot|Gun|Yamazaki):\s*', '', reply, flags=re.I).strip()
+                    return transcript, reply
+            except Exception as me:
+                logging.debug(f"Gemini voice note processing with {model_name} failed: {me}")
+                continue
+    except Exception as e:
+        logging.warning(f"process_voice_note_with_gemini error: {e}")
+    return "Voice note", "Got your voice note! How's it going?"
 
 def get_dynamic_fallback(lang_mode='hinglish'):
     pool = DYNAMIC_FALLBACKS_HINGLISH if lang_mode in ('hinglish', 'hindi_roman') else DYNAMIC_FALLBACKS_ENGLISH
@@ -208,14 +260,19 @@ def load_csv(day_name=None, shuffle_threads=True):
     else:
         logging.error(f"{CSV_FILE} not found in the directory.")
 
-# Multi-Tenant Group State Architecture
+# Multi-Tenant Group State Architecture (Persisted & Isolated)
 @dataclass
 class GroupState:
     chat_id: int
     title: str = ""
+    # Automation state (controlled by lockon / lockoff)
     is_active: bool = False
-    speed: float = 15.0                # Group-isolated speed (default: 15s)
+    automation_active: bool = False
+    # Conversational AI state (Jarvis Q&A: stays active 24/7 independently of lock state!)
+    conversational_ai_active: bool = True
+    speed: float = 45.0                # Group-isolated speed (default: 45s, 40-60s range)
     delete_delay: int = 900            # Group-isolated auto-delete delay
+    voice_replies_enabled: bool = True
     csv_index: int = 0
     active_day_name: str = ""
     active_workers: list = field(default_factory=list) # e.g. ["acc1", "acc2", "acc3", "acc4"]
@@ -231,19 +288,39 @@ class GroupState:
     last_voice_time: float = 0.0       # Cooldown for voice notes in this group (15+ mins)
     is_loop_running: bool = False
     state_msg_id: int = None
+    # Group-isolated conversation history (multi-turn memory)
+    conversation_history: list = field(default_factory=list)
+
+    def add_history_turn(self, sender_name: str, role: str, text: str):
+        self.conversation_history.append({"sender": sender_name, "role": role, "text": text})
+        if len(self.conversation_history) > 20:
+            self.conversation_history.pop(0)
+
+    def get_recent_dialogue_context(self, max_turns: int = 6) -> str:
+        recent = self.conversation_history[-max_turns:]
+        if not recent:
+            return "(No previous context in this group)"
+        return "\n".join(f"{t.get('sender', 'User')}: {t.get('text', '')}" for t in recent)
 
 group_states: dict[int, GroupState] = {}
 
 def get_group_state(chat_id: int, title: str = "") -> GroupState:
     if chat_id not in group_states:
+        ctx = bot_persistence.get_or_create_group_context(chat_id, title)
+        effective_speed = ctx.speed if (40.0 <= ctx.speed <= 60.0 or ctx.speed != 15.0) else 45.0
         group_states[chat_id] = GroupState(
             chat_id=chat_id,
-            title=title or f"Chat {chat_id}",
-            is_active=False,
-            speed=15.0,
-            delete_delay=int(os.getenv("DELETE_DELAY", 900)),
-            csv_index=0,
-            active_day_name=get_ist_day_name()
+            title=title or ctx.title,
+            is_active=ctx.automation_active,
+            automation_active=ctx.automation_active,
+            conversational_ai_active=ctx.conversational_ai_active,
+            speed=effective_speed,
+            delete_delay=ctx.delete_delay,
+            voice_replies_enabled=ctx.voice_replies_enabled,
+            csv_index=ctx.csv_index,
+            active_day_name=ctx.active_day_name or get_ist_day_name(),
+            conversation_history=list(ctx.conversation_history),
+            state_msg_id=ctx.state_msg_id
         )
     elif title and not group_states[chat_id].title:
         group_states[chat_id].title = title
@@ -251,13 +328,13 @@ def get_group_state(chat_id: int, title: str = "") -> GroupState:
 
 # Global state & Backward Compatibility Fallbacks
 bot_active = False
-message_speed = 15
+message_speed = 45.0
 delete_delay = int(os.getenv("DELETE_DELAY", 900))
 total_messages_sent = 0
 clients = {}
 SUPER_ADMIN_IDS = {5429173364, 8877720410}  # User 1 & mrfool (Full access)
 OPERATOR_USER_IDS = {6309134652}            # 4th Account / Operator
-AUTHORIZED_USERNAMES = {"merlin_hermis", "greatlotm"}
+AUTHORIZED_USERNAMES = {"merlin_hermis", "errormonocle", "greatlotm", "great_lotm"}
 ALL_ADMIN_IDS = SUPER_ADMIN_IDS | OPERATOR_USER_IDS
 ADMIN_USER_IDS = ALL_ADMIN_IDS
 OUR_USER_IDS = {5429173364}
@@ -270,141 +347,160 @@ async def register_and_warmup_group(chat_id: int, event=None) -> list[str]:
     """
     Dynamically inspects and warms up which of our automated accounts
     (acc1, acc2, acc3, acc4) are present in the group.
-    Resolves input peers so that acc2 and acc3 never crash or fail to send.
+    Resolves input peers with dialog and username scans so that acc2 and acc3 never fail.
     """
     state = get_group_state(chat_id)
+    chat_username = None
+    chat_title = None
     if event:
         try:
             chat = await event.get_chat()
             if hasattr(chat, 'title') and chat.title:
                 state.title = chat.title
-        except:
+                chat_title = chat.title
+            if hasattr(chat, 'username') and chat.username:
+                chat_username = chat.username
+        except Exception:
             pass
 
     detected = []
     peer_hint = getattr(event, 'input_chat', None) or getattr(event, 'chat', None)
+
     # Test human user accounts (acc1, acc2, acc3)
     for key in ["acc1", "acc2", "acc3"]:
         if key in clients:
             cl = clients[key]["client"]
-            try:
-                if peer_hint and key == "acc1":
-                    ent = peer_hint
-                else:
+            ent = None
+
+            # 1. Direct input entity or peer hint
+            if peer_hint and (event and getattr(event, 'client', None) == cl):
+                ent = peer_hint
+            if not ent:
+                try:
+                    ent = await cl.get_input_entity(chat_id)
+                except Exception:
                     try:
-                        ent = await cl.get_input_entity(chat_id)
-                    except:
                         ent = await cl.get_entity(chat_id)
+                    except Exception:
+                        pass
+
+            # 2. Try username resolution if available
+            if not ent and chat_username:
+                try:
+                    ent = await cl.get_input_entity(chat_username)
+                except Exception:
+                    try:
+                        ent = await cl.get_entity(chat_username)
+                    except Exception:
+                        pass
+
+            # 3. Search client dialogs
+            if not ent:
+                try:
+                    async for d in cl.iter_dialogs(limit=250):
+                        if d.id == chat_id or utils.get_peer_id(d.entity) == chat_id:
+                            ent = d.input_entity
+                            break
+                        if chat_title and hasattr(d.entity, 'title') and d.entity.title == chat_title:
+                            ent = d.input_entity
+                            break
+                except Exception as de:
+                    logging.debug(f"[{clients[key]['name']}] Dialog scan error: {de}")
+
+            if ent:
                 state.cached_entities[key] = ent
                 detected.append(key)
                 logging.info(f"[{clients[key]['name']}] Verified & cached for '{state.title}' ({chat_id})")
-            except Exception as e:
-                # If direct entity resolution fails, check dialogs
-                try:
-                    dialogs = await cl.get_dialogs(limit=50)
-                    for d in dialogs:
-                        if d.id == chat_id or utils.get_peer_id(d.entity) == chat_id:
-                            state.cached_entities[key] = d.input_entity
-                            detected.append(key)
-                            logging.info(f"[{clients[key]['name']}] Resolved from dialogs for '{state.title}' ({chat_id})")
-                            break
-                except:
-                    logging.warning(f"[{clients[key]['name']}] Cannot access chat {chat_id} ({e})")
-                    state.cached_entities.pop(key, None)
+            else:
+                logging.warning(f"[{clients[key]['name']}] Account not found or not in chat {chat_id}")
+                state.cached_entities.pop(key, None)
 
     # acc4 (Official Bot)
     if "acc4" in clients:
         cl = clients["acc4"]["client"]
+        ent = None
         try:
+            ent = await cl.get_input_entity(chat_id)
+        except Exception:
             try:
-                ent = await cl.get_input_entity(chat_id)
-            except Exception:
                 ent = await cl.get_entity(chat_id)
+            except Exception:
+                pass
+        if not ent and chat_username:
+            try:
+                ent = await cl.get_input_entity(chat_username)
+            except Exception:
+                pass
+        if not ent and peer_hint and (event and getattr(event, 'client', None) == cl):
+            ent = peer_hint
+
+        if ent:
             state.cached_entities["acc4"] = ent
             detected.append("acc4")
-            logging.info(f"[{clients['acc4']['name']}] Verified and cached for '{state.title}' ({chat_id})")
-        except Exception as e:
-            try:
-                ent = getattr(event, 'input_chat', None) or getattr(event, 'chat', None)
-                if ent:
-                    state.cached_entities["acc4"] = ent
-                    detected.append("acc4")
-                    logging.info(f"[{clients['acc4']['name']}] Resolved from peer hint for '{state.title}' ({chat_id})")
-            except Exception:
-                logging.warning(f"[Account 4 (Bot)] Entity error for chat {chat_id}: {e}")
+            logging.info(f"[{clients['acc4']['name']}] Verified & cached for '{state.title}' ({chat_id})")
+        else:
+            logging.warning(f"[Account 4 (Bot)] Could not cache entity for chat {chat_id}")
 
     state.active_workers = detected
     logging.info(f"Group '{state.title}' ({chat_id}) active messaging workers: {detected}")
     return detected
 
 async def load_all_states_from_telegram():
-    """Restores all group states independently from Telegram Saved Messages."""
+    """Restores all group states independently from local storage and Telegram Saved Messages."""
     try:
-        if "acc1" not in clients:
-            return
-        acc1 = clients["acc1"]["client"]
-        async for msg in acc1.iter_messages("me", limit=100, search="[GunYamazaki GroupState"):
-            if not msg.text:
-                continue
-            for line in msg.text.splitlines():
-                if "[GunYamazaki GroupState" in line:
-                    try:
-                        m = re.search(r'\[GunYamazaki GroupState\s+(-?\d+)\]\s*(.*)', line)
-                        if m:
-                            cid = int(m.group(1))
-                            state = get_group_state(cid)
-                            state.state_msg_id = msg.id
-                            props = m.group(2)
-                            for item in props.split():
-                                if "=" in item:
-                                    k, v = item.split("=", 1)
-                                    if k == "active":
-                                        state.is_active = (v in ("1", "true", "True"))
-                                    elif k == "speed":
-                                        state.speed = float(v)
-                                    elif k == "delete_delay":
-                                        state.delete_delay = int(v)
-                                    elif k == "csv_index":
-                                        state.csv_index = int(v)
-                                    elif k == "day":
-                                        state.active_day_name = v.lower()
-                                    elif k == "title":
-                                        state.title = v.replace("_", " ")
-                            logging.info(f"Restored isolated group state for {state.title} ({cid}): speed={state.speed}s active={state.is_active}")
-                    except Exception as pe:
-                        logging.warning(f"Error parsing saved state line: {pe}")
+        # 1. Restore from persistent local JSON
+        local_data = bot_persistence.load_local_state()
+        for cid, ctx in local_data.items():
+            st = get_group_state(cid, ctx.title)
+            st.is_active = ctx.automation_active
+            st.automation_active = ctx.automation_active
+            st.conversational_ai_active = ctx.conversational_ai_active
+            st.speed = ctx.speed
+            st.delete_delay = ctx.delete_delay
+            st.voice_replies_enabled = ctx.voice_replies_enabled
+            st.csv_index = ctx.csv_index
+            st.active_day_name = ctx.active_day_name
+            st.conversation_history = list(ctx.conversation_history)
+            st.state_msg_id = ctx.state_msg_id
+
+        # 2. Sync from Telegram Saved Messages
+        if "acc1" in clients and clients["acc1"]["client"].is_connected():
+            await bot_persistence.restore_from_telegram_cloud(clients["acc1"]["client"])
+            for cid, ctx in bot_persistence._group_cache.items():
+                st = get_group_state(cid, ctx.title)
+                st.is_active = ctx.automation_active
+                st.automation_active = ctx.automation_active
+                st.conversational_ai_active = ctx.conversational_ai_active
+                st.speed = ctx.speed
+                st.delete_delay = ctx.delete_delay
+                st.voice_replies_enabled = ctx.voice_replies_enabled
+                st.csv_index = ctx.csv_index
+                st.active_day_name = ctx.active_day_name
+                st.state_msg_id = ctx.state_msg_id
     except Exception as e:
-        logging.error(f"Failed to load group states from telegram: {e}")
+        logging.error(f"Failed to load group states: {e}")
 
 async def save_group_state_to_telegram(chat_id: int):
-    """Persists an individual group's isolated settings to Telegram Saved Messages."""
+    """Persists an individual group's isolated settings to local storage and Telegram Saved Messages."""
     try:
-        if "acc1" not in clients:
-            return
-        acc1 = clients["acc1"]["client"]
         state = get_group_state(chat_id)
-        clean_title = (state.title or f"Chat_{chat_id}").replace(" ", "_")
-        text = (
-            f"[GunYamazaki GroupState {chat_id}] "
-            f"active={1 if state.is_active else 0} "
-            f"speed={state.speed} "
-            f"delete_delay={state.delete_delay} "
-            f"csv_index={state.csv_index} "
-            f"day={state.active_day_name or get_ist_day_name()} "
-            f"title={clean_title}"
-        )
-        if state.state_msg_id:
-            try:
-                await acc1.edit_message("me", state.state_msg_id, text)
-                return
-            except:
-                pass
-        msg = await acc1.send_message("me", text)
-        state.state_msg_id = msg.id
+        ctx = bot_persistence.get_or_create_group_context(chat_id, state.title)
+        ctx.automation_active = state.is_active
+        ctx.conversational_ai_active = state.conversational_ai_active
+        ctx.speed = state.speed
+        ctx.delete_delay = state.delete_delay
+        ctx.voice_replies_enabled = state.voice_replies_enabled
+        ctx.csv_index = state.csv_index
+        ctx.active_day_name = state.active_day_name or get_ist_day_name()
+        ctx.title = state.title
+        ctx.conversation_history = list(state.conversation_history)
+        bot_persistence.save_local_state()
+
+        if "acc1" in clients and clients["acc1"]["client"].is_connected():
+            await bot_persistence.sync_group_to_telegram_cloud(clients["acc1"]["client"], chat_id)
     except Exception as e:
         logging.warning(f"Failed to save state for group {chat_id}: {e}")
 
-# Backward compatibility wrappers
 async def load_state_from_telegram():
     await load_all_states_from_telegram()
     return 0
@@ -750,11 +846,11 @@ def setup_commands(bot_client):
     async def are_primary_accounts_in_group(client, chat_id: int) -> bool:
         try:
             state = get_group_state(chat_id)
-            has_owner = (5429173364 in state.known_user_ids) or ("merlin_hermis" in state.known_usernames)
-            has_greatlotm = ("greatlotm" in state.known_usernames)
+            has_owner = (5429173364 in state.known_user_ids) or any(u in state.known_usernames for u in ("merlin_hermis", "errormonocle"))
+            has_greatlotm = (8877720410 in state.known_user_ids) or any(u in state.known_usernames for u in ("greatlotm", "great_lotm"))
             if has_owner and has_greatlotm:
                 return True
-                
+
             participants = await client.get_participants(chat_id, limit=300)
             p_ids = set()
             p_users = set()
@@ -766,27 +862,27 @@ def setup_commands(bot_client):
                 if u:
                     p_users.add(u)
                     state.known_usernames.add(u)
-                    
-            has_owner = (5429173364 in p_ids) or ("merlin_hermis" in p_users)
-            has_greatlotm = ("greatlotm" in p_users)
+
+            has_owner = (5429173364 in p_ids) or any(u in p_users for u in ("merlin_hermis", "errormonocle"))
+            has_greatlotm = (8877720410 in p_ids) or any(u in p_users for u in ("greatlotm", "great_lotm"))
             return (has_owner and has_greatlotm)
         except Exception as e:
             logging.debug(f"Could not check participants for {chat_id}: {e}")
             state = get_group_state(chat_id)
-            return (("merlin_hermis" in state.known_usernames or 5429173364 in state.known_user_ids) and 
-                    ("greatlotm" in state.known_usernames))
+            return (("merlin_hermis" in state.known_usernames or "errormonocle" in state.known_usernames or 5429173364 in state.known_user_ids) and 
+                    ("greatlotm" in state.known_usernames or "great_lotm" in state.known_usernames or 8877720410 in state.known_user_ids))
 
     async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
         s_id, username = await get_sender_identity(event)
-        
-        is_owner = (s_id in SUPER_ADMIN_IDS) or (username == "merlin_hermis")
-        is_greatlotm = (username == "greatlotm")
+
+        is_owner = (s_id in SUPER_ADMIN_IDS) or (username in ("merlin_hermis", "errormonocle"))
+        is_greatlotm = (s_id == 8877720410) or (username in ("greatlotm", "great_lotm"))
         is_operator = (s_id in OPERATOR_USER_IDS)
-        
-        # If not authorized at all, completely ignore
+
+        # If not authorized at all, ignore
         if not (is_owner or is_greatlotm or is_operator):
             return False, "Unauthorized account."
-            
+
         if event.is_private:
             if is_owner or is_greatlotm:
                 return True, ""
@@ -795,6 +891,20 @@ def setup_commands(bot_client):
                     return True, ""
                 return False, "Operator role is restricted strictly to lockon and lockoff only."
             return False, "Unauthorized."
+
+        chat_id = event.chat_id
+        probe_client = clients.get("acc1", {}).get("client") or event.client
+        primaries_present = await are_primary_accounts_in_group(probe_client, chat_id)
+
+        if is_owner or is_greatlotm:
+            return True, ""
+
+        if is_operator:
+            if cmd_name in ["lockon", "lockoff"]:
+                return True, ""
+            return False, "The fourth account is restricted to lockon and lockoff only."
+
+        return False, "Unauthorized."
 
         chat_id = event.chat_id
         probe_client = clients.get("acc1", {}).get("client") or event.client
@@ -949,20 +1059,21 @@ def setup_commands(bot_client):
                 chat = await event.get_chat()
                 state.title = getattr(chat, 'title', state.title or f"Chat {chat_id}")
             except: pass
-            
+
             workers = await register_and_warmup_group(chat_id, event)
             state.is_active = True
+            state.automation_active = True
             asyncio.create_task(run_group_chat_loop(chat_id))
             await save_group_state_to_telegram(chat_id)
-            
+
             worker_names = [clients[w]["name"] for w in workers if w in clients]
             workers_str = ", ".join(worker_names) if worker_names else "Account 1, Bot"
             await send_bot_reply(event, 
-                f"🟢 **Locked On to {state.title}!**\n\n"
-                f"• **Group Speed:** {state.speed}s\n"
-                f"• **Active Workers in Group:** {workers_str}\n"
-                f"• **Auto-Delete:** {format_seconds_to_readable(state.delete_delay)}\n"
-                f"• **Adult Boy Voice Notes:** 🎙 ONLINE (Distinct voices, natural spacing)\n\n"
+                f"🚀 **Automation Locked On to {state.title}!**\n\n"
+                f"  **Group Automated Interval:** {state.speed}s (Default: 40–60s)\n"
+                f"  **Active Workers in Group:** {workers_str}\n"
+                f"  **Conversational AI (Jarvis):** 🟢 ONLINE (Text & Voice Q&A)\n"
+                f"  **Auto-Delete:** {format_seconds_to_readable(state.delete_delay)}\n\n"
                 f"💡 *This group runs completely independently. Other groups are unaffected.*"
             )
             logging.info(f"System LOCKED ON to {chat_id} ('{state.title}') with workers: {workers}")
@@ -978,41 +1089,58 @@ def setup_commands(bot_client):
             chat_id = event.chat_id
             state = get_group_state(chat_id)
             state.is_active = False
+            state.automation_active = False
             await save_group_state_to_telegram(chat_id)
-            await send_bot_reply(event, f"🛑 **Locked Off.**\n`{state.title}` is now paused. Other groups continue running unaffected.")
+            await send_bot_reply(event, 
+                f"🛑 **Automation Locked Off.**\n"
+                f"Automated background messaging is now paused in `{state.title}`.\n"
+                f"🤖 **GenzetaBot Conversational AI (Jarvis):** 🟢 ONLINE — Ready to chat and answer text & voice questions anytime!"
+            )
             logging.info(f"System LOCKED OFF in {chat_id} ('{state.title}')")
         except Exception as e:
             logging.error(f"Error in lockoff_handler: {e}")
+
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?resetgroup(?:@genzetabot)?$'))
+    async def resetgroup_handler(event):
+        if should_skip_cmd(event): return
+        try:
+            allowed, _ = await check_command_auth(event, "resetgroup")
+            if not allowed: return
+            s_id, username = await get_sender_identity(event)
+            is_owner = (s_id in SUPER_ADMIN_IDS) or (username in ("merlin_hermis", "errormonocle"))
+            if not is_owner:
+                await send_bot_reply(event, "⚠️ Only the primary owner can perform a full group configuration reset.")
+                return
+            chat_id = event.chat_id
+            bot_persistence.reset_group_state(chat_id)
+            st = get_group_state(chat_id)
+            st.is_active = False
+            st.automation_active = False
+            st.speed = 45.0
+            st.conversational_ai_active = True
+            await send_bot_reply(event, f"🔄 **Group Configuration Reset.**\n`{st.title}` has been restored to default settings:\n- Automation: PAUSED\n- Conversational AI: ONLINE\n- Interval: 45s\n- Memory: Cleared")
+        except Exception as e:
+            logging.error(f"Error in resetgroup_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
         if should_skip_cmd(event): return
         try:
-            allowed, reason = await check_command_auth(event, "setspeed")
-            if not allowed:
-                if reason: await send_bot_reply(event, f"❌ {reason}")
-                return
+            allowed, _ = await check_command_auth(event, "setspeed")
+            if not allowed: return
             chat_id = event.chat_id
             state = get_group_state(chat_id)
-            arg = event.pattern_match.group(1)
-            if not arg or not arg.strip():
-                await send_bot_reply(event, 
-                    f"⚡ **Speed for {state.title}:** 1 message every **{state.speed}s**.\n\n"
-                    f"This setting is isolated **only** to this group.\n"
-                    f"To change, send: `setspeed 5s`, `setspeed 10s`, `setspeed 15s`, etc."
-                )
+            arg = (event.pattern_match.group(1) or "").strip()
+            if not arg:
+                await send_bot_reply(event, f"⏱ **Group Automated Speed:** {state.speed}s\nDefault interval is 45s (40–60s range). Use `setspeed 50` to change.")
                 return
-            speed_val = parse_time_to_seconds(arg.strip())
-            if speed_val is not None and speed_val > 0:
-                state.speed = float(speed_val)
-                await save_group_state_to_telegram(chat_id)
-                await send_bot_reply(event, 
-                    f"⚡ **Speed Updated for {state.title} Only!**\n\n"
-                    f"Messages in this group will now send 1 message every **{state.speed} seconds**.\n"
-                    f"Other groups retain their own independent speed settings."
-                )
-            else:
-                await send_bot_reply(event, "❌ Invalid speed! Example: `setspeed 5s`, `setspeed 10s`, or `setspeed 15s`.")
+            new_speed = float(arg)
+            if new_speed < 1.0 or new_speed > 300.0:
+                await send_bot_reply(event, "⚠️ Speed must be between 1 and 300 seconds.")
+                return
+            state.speed = new_speed
+            await save_group_state_to_telegram(chat_id)
+            await send_bot_reply(event, f"⚡ **Group Speed Updated!**\n`{state.title}` is now set to **{new_speed}s** interval.\nOther groups remain unaffected.")
         except Exception as e:
             logging.error(f"Error in setspeed_handler: {e}")
 
@@ -1538,7 +1666,7 @@ async def run_group_chat_loop(chat_id: int):
     if not conversation_data:
         load_csv()
 
-    while state.is_active:
+    while state.is_active and state.automation_active:
         current_time = time.time()
         
         if not conversation_data:
@@ -1734,7 +1862,7 @@ async def chat_loop_supervisor():
                     
             # Check all active groups and ensure their loop is running
             for cid, st in list(group_states.items()):
-                if st.is_active and not st.is_loop_running:
+                if st.is_active and st.automation_active and not st.is_loop_running:
                     logging.info(f"Supervisor starting loop for active group '{st.title}' ({cid})")
                     asyncio.create_task(run_group_chat_loop(cid))
         except Exception as e:
