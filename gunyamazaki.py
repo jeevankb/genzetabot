@@ -963,6 +963,11 @@ def setup_commands(bot_client):
 
             recent_chat_history.append(f"{sender_name}: {raw_text}")
 
+            # CRITICAL: User accounts (acc1, acc2, acc3) must NEVER generate or send AI replies to humans!
+            # All replies to real humans in groups and DMs MUST come strictly and exclusively through acc4 (the Bot)!
+            if not is_acc4:
+                return
+
             # Check if this message is addressing a specific account or gun
             is_reply_to_our_bot = False
             replied_acc_key = None
@@ -991,28 +996,13 @@ def setup_commands(bot_client):
                 return
             globals()['last_human_reply_time'] = now
 
-            # Choose which account will speak
-            if is_private_msg:
-                # Private DMs are strictly handled and spoken by acc4 (Gun Yamazaki Bot)
-                chosen_client_cfg = clients.get("acc4") or {"client": bot_client, "name": "Gun Yamazaki"}
-                speaker_client = chosen_client_cfg["client"]
-                speaker_name = chosen_client_cfg["name"]
-            elif is_gun_mention:
-                chosen_client_cfg = clients.get("acc4") or {"client": bot_client, "name": "Gun Yamazaki"}
-                speaker_client = chosen_client_cfg["client"]
-                speaker_name = chosen_client_cfg["name"]
-            elif is_reply_to_our_bot and replied_acc_key and replied_acc_key in clients:
-                chosen_client_cfg = clients[replied_acc_key]
-                speaker_client = chosen_client_cfg["client"]
-                speaker_name = chosen_client_cfg["name"]
-            else:
-                # User asked/chatted in the middle of group chat without direct reply:
-                # Pick an account organically like a real group member responding!
-                available_keys = [k for k in clients.keys() if k in ("acc1", "acc2", "acc3", "acc4")]
-                chosen_key = random.choice(available_keys) if available_keys else "acc1"
-                chosen_client_cfg = clients.get(chosen_key) or {"client": bot_client, "name": "Gun Yamazaki"}
-                speaker_client = chosen_client_cfg["client"]
-                speaker_name = chosen_client_cfg["name"]
+            # All dynamic AI replies to humans MUST come exclusively through acc4 (Gun Yamazaki Bot)
+            acc4_cfg = clients.get("acc4")
+            if not acc4_cfg or not acc4_cfg["client"].is_connected():
+                return
+            chosen_client_cfg = acc4_cfg
+            speaker_client = acc4_cfg["client"]
+            speaker_name = acc4_cfg["name"]
 
             # Detect language mode
             lang_mode = detect_language_mode([raw_text] + list(recent_chat_history))
