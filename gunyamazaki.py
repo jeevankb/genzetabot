@@ -54,7 +54,15 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 # Setup Logging with Redaction Filter
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try: sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    except Exception: pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try: sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    except Exception: pass
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout, force=True)
 for h in logging.root.handlers:
     h.addFilter(SensitiveDataFilter())
 
@@ -1407,9 +1415,27 @@ def setup_commands(bot_client):
                 return
 
             # -----------------------------------------------------------------
-            # 1. IF ONE OF OUR ACCOUNTS SPEAKS IN GROUP (Automated Dataset Banter)
+            # Check addressing and mentions first
+            is_reply_to_our_bot = False
+            if event.message.is_reply:
+                try:
+                    reply_msg = await event.message.get_reply_message()
+                    if reply_msg:
+                        for acc_k, acc_v in clients.items():
+                            if reply_msg.sender_id == acc_v.get("user_id"):
+                                is_reply_to_our_bot = True
+                                break
+                        if not is_reply_to_our_bot and (reply_msg.sender_id in OUR_USER_IDS or reply_msg.sender_id == getattr(bot_client, '_self_id', None)):
+                            is_reply_to_our_bot = True
+                except: pass
+
+            is_bot_mention = bool(re.search(r'(?i)(@genzetabot|genzeta|jarvis|gun|yamazaki|gunyamazaki)', msg_text))
+            should_respond = is_private_msg or is_reply_to_our_bot or is_bot_mention or is_voice_note
+
             # -----------------------------------------------------------------
-            if sender_id in OUR_USER_IDS:
+            # 1. Automated Dataset Banter (ONLY ignore if NOT addressing the bot!)
+            # -----------------------------------------------------------------
+            if sender_id in OUR_USER_IDS and not should_respond:
                 if raw_text:
                     state.add_history_turn("Friend", "assistant", raw_text)
                 if random.random() < 0.12:
@@ -1426,8 +1452,19 @@ def setup_commands(bot_client):
                     except: pass
                 return
 
+            if not should_respond:
+                # Still record message into group context for context awareness
+                sender_name = "User"
+                try:
+                    s_ent = await event.get_sender()
+                    sender_name = getattr(s_ent, 'first_name', '') or getattr(s_ent, 'username', '') or "User"
+                except: pass
+                if raw_text:
+                    state.add_history_turn(sender_name, "user", raw_text)
+                return
+
             # -----------------------------------------------------------------
-            # 2. REAL HUMAN GROUP MEMBER (OR PRIVATE DM)
+            # 2. REAL HUMAN / OWNER DIRECT QUESTION TO BOT (OR PRIVATE DM)
             # -----------------------------------------------------------------
             # Deduplicate messages
             msg_id = getattr(event.message, 'id', None)
@@ -1449,37 +1486,12 @@ def setup_commands(bot_client):
                 sender_name = getattr(s_ent, 'first_name', '') or getattr(s_ent, 'username', '') or "User"
             except: pass
 
-            # CRITICAL: Replies to real humans MUST come strictly through acc4 (the Bot)!
+            # CRITICAL: Replies to humans MUST come strictly through acc4 (the Bot)!
             if not is_acc4:
                 return
 
             # Pause scripted dataset playback for 30s so human conversation can flow
             globals()['csv_paused_until'] = time.time() + 30.0
-
-            # Check addressing
-            is_reply_to_our_bot = False
-            if event.message.is_reply:
-                try:
-                    reply_msg = await event.message.get_reply_message()
-                    if reply_msg:
-                        for acc_k, acc_v in clients.items():
-                            if reply_msg.sender_id == acc_v.get("user_id"):
-                                is_reply_to_our_bot = True
-                                break
-                        if not is_reply_to_our_bot and (reply_msg.sender_id in OUR_USER_IDS or reply_msg.sender_id == getattr(bot_client, '_self_id', None)):
-                            is_reply_to_our_bot = True
-                except: pass
-
-            is_bot_mention = bool(re.search(r'(?i)(@genzetabot|\bgenzeta\b|\bjarvis\b|\bgun\b|\byamazaki\b|gunyamazaki)', msg_text))
-
-            # In groups, respond if: private DM, replied to bot, mentioned bot, or voice note sent directly
-            should_respond = is_private_msg or is_reply_to_our_bot or is_bot_mention or is_voice_note
-
-            if not should_respond:
-                # Still record message into group context for context awareness
-                if raw_text:
-                    state.add_history_turn(sender_name, "user", raw_text)
-                return
 
             # Debounce quick consecutive messages
             now = time.time()
