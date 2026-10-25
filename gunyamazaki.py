@@ -224,6 +224,7 @@ class GroupState:
     known_usernames: set = field(default_factory=set)
     last_chosen_key: str = None
     last_conv_id: str = None
+    thread_speaker_map: dict = field(default_factory=dict)
     recent_thread_messages: list = field(default_factory=list)
     message_tracker: dict = field(default_factory=dict)
     rate_limited_until: dict = field(default_factory=dict)
@@ -315,11 +316,22 @@ async def register_and_warmup_group(chat_id: int, event=None) -> list[str]:
     if "acc4" in clients:
         cl = clients["acc4"]["client"]
         try:
-            ent = getattr(event, 'input_chat', None) or await cl.get_entity(chat_id)
+            try:
+                ent = await cl.get_input_entity(chat_id)
+            except Exception:
+                ent = await cl.get_entity(chat_id)
             state.cached_entities["acc4"] = ent
             detected.append("acc4")
+            logging.info(f"[{clients['acc4']['name']}] Verified and cached for '{state.title}' ({chat_id})")
         except Exception as e:
-            logging.warning(f"[Account 4 (Bot)] Entity error for chat {chat_id}: {e}")
+            try:
+                ent = getattr(event, 'input_chat', None) or getattr(event, 'chat', None)
+                if ent:
+                    state.cached_entities["acc4"] = ent
+                    detected.append("acc4")
+                    logging.info(f"[{clients['acc4']['name']}] Resolved from peer hint for '{state.title}' ({chat_id})")
+            except Exception:
+                logging.warning(f"[Account 4 (Bot)] Entity error for chat {chat_id}: {e}")
 
     state.active_workers = detected
     logging.info(f"Group '{state.title}' ({chat_id}) active messaging workers: {detected}")
@@ -1563,16 +1575,38 @@ async def run_group_chat_loop(chat_id: int):
             continue
         recent_sent_dataset_texts.append(clean_text)
         
-        if state.last_conv_id and conv_id and conv_id != state.last_conv_id:
+        # Map thread roles dynamically across ALL available accounts (acc1, acc2, acc3, acc4)
+        # so that the Bot (acc4) and user accounts talk completely equally like friends!
+        if conv_id and conv_id != state.last_conv_id:
             state.recent_thread_messages.clear()
             thread_pause = min(random.uniform(2.0, 5.0), state.speed * 0.7)
             await asyncio.sleep(thread_pause)
+            if available_workers:
+                shuffled = random.sample(available_workers, len(available_workers))
+                csv_roles = ["acc1", "acc2", "acc3"]
+                state.thread_speaker_map = {
+                    role: shuffled[i % len(shuffled)]
+                    for i, role in enumerate(csv_roles)
+                }
         state.last_conv_id = conv_id
-        
-        if sender_str in available_workers:
-            chosen_key = sender_str
-        else:
+
+        if not state.thread_speaker_map and available_workers:
+            shuffled = random.sample(available_workers, len(available_workers))
+            csv_roles = ["acc1", "acc2", "acc3"]
+            state.thread_speaker_map = {
+                role: shuffled[i % len(shuffled)]
+                for i, role in enumerate(csv_roles)
+            }
+
+        chosen_key = state.thread_speaker_map.get(sender_str)
+        if not chosen_key or chosen_key not in available_workers:
             chosen_key = random.choice(available_workers)
+
+        # Prevent the exact same worker from replying to themselves when multiple workers exist
+        if chosen_key == state.last_chosen_key and len(available_workers) > 1 and reply_to_csv:
+            alt_workers = [w for w in available_workers if w != state.last_chosen_key]
+            if alt_workers:
+                chosen_key = random.choice(alt_workers)
             
         is_same_speaker = (chosen_key == state.last_chosen_key)
         state.last_chosen_key = chosen_key
@@ -1596,7 +1630,7 @@ async def run_group_chat_loop(chat_id: int):
             # - acc3: Energetic guy (hi-IN-MadhurNeural, +6Hz pitch, +8% rate)
             # Minimum 15-minute cooldown per group, natural 2.5% chance
             voice_sent = False
-            if (chosen_key in ["acc1", "acc2", "acc3"] and 
+            if (chosen_key in ["acc1", "acc2", "acc3", "acc4"] and 
                 (current_time - state.last_voice_time > 900) and 
                 random.random() < 0.025):
                 try:
@@ -1607,12 +1641,19 @@ async def run_group_chat_loop(chat_id: int):
                     )
                     if vn_path and os.path.exists(vn_path):
                         await simulate_typing(client, entity, "voice", group_speed=state.speed)
-                        sent_vn = await client.send_file(
-                            entity,
-                            vn_path,
-                            voice_note=True,
-                            reply_to=reply_msg_id
-                        )
+                        try:
+                            sent_vn = await client.send_file(
+                                entity,
+                                vn_path,
+                                voice_note=True,
+                                reply_to=reply_msg_id
+                            )
+                        except Exception:
+                            sent_vn = await client.send_file(
+                                entity,
+                                vn_path,
+                                voice_note=True
+                            )
                         state.last_voice_time = time.time()
                         voice_sent = True
                         logging.info(f"🎙 [{name}] Sent Realistic Adult Boy Voice Note in '{state.title}': '{vn_text}'")

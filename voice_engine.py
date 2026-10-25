@@ -32,7 +32,8 @@ FISH_VOICE_MODELS = {
 ELEVENLABS_VOICE_MODELS = {
     "acc1": "TX3LPaxmHKxFdv7VOQHJ",  # Liam (Energetic young adult)
     "acc2": "IKne3meq5aSn9XLyUdCD",  # Charlie (Deeper casual guy)
-    "acc3": "CwhRBWXzGAHq8TQ4Fs17"   # Roger (Laid-back resonant guy)
+    "acc3": "CwhRBWXzGAHq8TQ4Fs17",  # Roger (Laid-back resonant guy)
+    "acc4": "bIHbv24MWmeRgasZH58o"   # Will (Friendly, natural young adult guy - Bot)
 }
 
 # 3. Edge-TTS Neural Fallbacks
@@ -54,6 +55,12 @@ BOY_VOICE_PROFILES = {
         "voice": "hi-IN-MadhurNeural",
         "rate": "+8%",
         "pitch": "+6Hz"
+    },
+    "acc4": {
+        "name": "Gun Yamazaki (Bot)",
+        "voice": "hi-IN-MadhurNeural",
+        "rate": "+2%",
+        "pitch": "-2Hz"
     }
 }
 
