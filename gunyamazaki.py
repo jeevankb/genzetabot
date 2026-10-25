@@ -15,6 +15,9 @@ import json
 import time
 import collections
 from PIL import Image
+from dataclasses import dataclass, field
+import voice_engine
+
 from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, utils
@@ -205,77 +208,180 @@ def load_csv(day_name=None, shuffle_threads=True):
     else:
         logging.error(f"{CSV_FILE} not found in the directory.")
 
-# Global state
+# Multi-Tenant Group State Architecture
+@dataclass
+class GroupState:
+    chat_id: int
+    title: str = ""
+    is_active: bool = False
+    speed: float = 15.0                # Group-isolated speed (default: 15s)
+    delete_delay: int = 900            # Group-isolated auto-delete delay
+    csv_index: int = 0
+    active_day_name: str = ""
+    active_workers: list = field(default_factory=list) # e.g. ["acc1", "acc2", "acc3", "acc4"]
+    cached_entities: dict = field(default_factory=dict)
+    known_user_ids: set = field(default_factory=set)
+    known_usernames: set = field(default_factory=set)
+    last_chosen_key: str = None
+    last_conv_id: str = None
+    recent_thread_messages: list = field(default_factory=list)
+    message_tracker: dict = field(default_factory=dict)
+    rate_limited_until: dict = field(default_factory=dict)
+    last_voice_time: float = 0.0       # Cooldown for voice notes in this group (15+ mins)
+    is_loop_running: bool = False
+    state_msg_id: int = None
+
+group_states: dict[int, GroupState] = {}
+
+def get_group_state(chat_id: int, title: str = "") -> GroupState:
+    if chat_id not in group_states:
+        group_states[chat_id] = GroupState(
+            chat_id=chat_id,
+            title=title or f"Chat {chat_id}",
+            is_active=False,
+            speed=15.0,
+            delete_delay=int(os.getenv("DELETE_DELAY", 900)),
+            csv_index=0,
+            active_day_name=get_ist_day_name()
+        )
+    elif title and not group_states[chat_id].title:
+        group_states[chat_id].title = title
+    return group_states[chat_id]
+
+# Global state & Backward Compatibility Fallbacks
 bot_active = False
 message_speed = 15
-delete_delay = int(os.getenv("DELETE_DELAY", 900))  # Default 15 minutes (changeable anytime by User 1 via /setdelete)
+delete_delay = int(os.getenv("DELETE_DELAY", 900))
 total_messages_sent = 0
 clients = {}
 SUPER_ADMIN_IDS = {5429173364, 8877720410}  # User 1 & mrfool (Full access)
-OPERATOR_USER_IDS = {6309134652}            # Operator (Strictly lockon / lockoff only)
+OPERATOR_USER_IDS = {6309134652}            # 4th Account / Operator
+AUTHORIZED_USERNAMES = {"merlin_hermis", "greatlotm"}
 ALL_ADMIN_IDS = SUPER_ADMIN_IDS | OPERATOR_USER_IDS
-ADMIN_USER_IDS = ALL_ADMIN_IDS              # Backward compatibility
-OUR_USER_IDS = {5429173364}  # User IDs of automated accounts (acc1, acc2, acc3, acc4)
+ADMIN_USER_IDS = ALL_ADMIN_IDS
+OUR_USER_IDS = {5429173364}
 STATE_MSG_ID = None
 current_csv_index = 0
 processed_cmd_msg_ids = set()
 recent_sent_dataset_texts = collections.deque(maxlen=200)
 
-async def load_state_from_telegram():
-    global STATE_MSG_ID, current_csv_index, delete_delay, message_speed, active_day_name
+async def register_and_warmup_group(chat_id: int, event=None) -> list[str]:
+    """
+    Dynamically inspects and warms up which of our automated accounts
+    (acc1, acc2, acc3, acc4) are present in the group.
+    Resolves input peers so that acc2 and acc3 never crash or fail to send.
+    """
+    state = get_group_state(chat_id)
+    if event:
+        try:
+            chat = await event.get_chat()
+            if hasattr(chat, 'title') and chat.title:
+                state.title = chat.title
+        except:
+            pass
+
+    detected = []
+    # Test human user accounts (acc1, acc2, acc3)
+    for key in ["acc1", "acc2", "acc3"]:
+        if key in clients:
+            cl = clients[key]["client"]
+            try:
+                ent = await cl.get_entity(chat_id)
+                state.cached_entities[key] = ent
+                detected.append(key)
+                logging.info(f"[{clients[key]['name']}] Verified & cached for '{state.title}' ({chat_id})")
+            except Exception as e:
+                logging.warning(f"[{clients[key]['name']}] Cannot access chat {chat_id} ({e})")
+                state.cached_entities.pop(key, None)
+
+    # acc4 (Official Bot)
+    if "acc4" in clients:
+        cl = clients["acc4"]["client"]
+        try:
+            ent = getattr(event, 'input_chat', None) or await cl.get_entity(chat_id)
+            state.cached_entities["acc4"] = ent
+            detected.append("acc4")
+        except Exception as e:
+            logging.warning(f"[Account 4 (Bot)] Entity error for chat {chat_id}: {e}")
+
+    state.active_workers = detected
+    logging.info(f"Group '{state.title}' ({chat_id}) active messaging workers: {detected}")
+    return detected
+
+async def load_all_states_from_telegram():
+    """Restores all group states independently from Telegram Saved Messages."""
     try:
+        if "acc1" not in clients:
+            return
         acc1 = clients["acc1"]["client"]
-        async for msg in acc1.iter_messages("me", search="[GunYamazaki State]"):
-            if "[GunYamazaki State]" in msg.text:
-                STATE_MSG_ID = msg.id
-                try:
-                    parts = msg.text.split()
-                    saved_day = None
-                    for p in parts:
-                        if p.startswith("csv_index="):
-                            current_csv_index = int(p.split("=")[1])
-                        elif p.startswith("delete_delay="):
-                            delete_delay = int(p.split("=")[1])
-                            logging.info(f"Restored delete_delay from Telegram: {delete_delay}s ({format_seconds_to_readable(delete_delay)})")
-                        elif p.startswith("message_speed="):
-                            message_speed = int(p.split("=")[1])
-                            logging.info(f"Restored message_speed from Telegram: {message_speed}s")
-                        elif p.startswith("day="):
-                            saved_day = p.split("=")[1].lower().strip()
-                            
-                    today_day = get_ist_day_name()
-                    if saved_day and saved_day != today_day:
-                        logging.info(f"Saved state day ({saved_day}) differs from today ({today_day} IST). Starting fresh at index 0 for {today_day}.")
-                        current_csv_index = 0
-                        load_csv(today_day, shuffle_threads=True)
-                    elif saved_day:
-                        active_day_name = saved_day
-                        # When resuming mid-day with an existing index, preserve dataset ordering
-                        load_csv(active_day_name, shuffle_threads=False)
-                    else:
-                        load_csv(today_day, shuffle_threads=True)
-                    return current_csv_index
-                except: pass
-                break
+        async for msg in acc1.iter_messages("me", limit=100, search="[GunYamazaki GroupState"):
+            if not msg.text:
+                continue
+            for line in msg.text.splitlines():
+                if "[GunYamazaki GroupState" in line:
+                    try:
+                        m = re.search(r'\[GunYamazaki GroupState\s+(-?\d+)\]\s*(.*)', line)
+                        if m:
+                            cid = int(m.group(1))
+                            state = get_group_state(cid)
+                            state.state_msg_id = msg.id
+                            props = m.group(2)
+                            for item in props.split():
+                                if "=" in item:
+                                    k, v = item.split("=", 1)
+                                    if k == "active":
+                                        state.is_active = (v in ("1", "true", "True"))
+                                    elif k == "speed":
+                                        state.speed = float(v)
+                                    elif k == "delete_delay":
+                                        state.delete_delay = int(v)
+                                    elif k == "csv_index":
+                                        state.csv_index = int(v)
+                                    elif k == "day":
+                                        state.active_day_name = v.lower()
+                                    elif k == "title":
+                                        state.title = v.replace("_", " ")
+                            logging.info(f"Restored isolated group state for {state.title} ({cid}): speed={state.speed}s active={state.is_active}")
+                    except Exception as pe:
+                        logging.warning(f"Error parsing saved state line: {pe}")
     except Exception as e:
-        logging.error(f"Failed to load state from telegram: {e}")
-    load_csv(shuffle_threads=True)
+        logging.error(f"Failed to load group states from telegram: {e}")
+
+async def save_group_state_to_telegram(chat_id: int):
+    """Persists an individual group's isolated settings to Telegram Saved Messages."""
+    try:
+        if "acc1" not in clients:
+            return
+        acc1 = clients["acc1"]["client"]
+        state = get_group_state(chat_id)
+        clean_title = (state.title or f"Chat_{chat_id}").replace(" ", "_")
+        text = (
+            f"[GunYamazaki GroupState {chat_id}] "
+            f"active={1 if state.is_active else 0} "
+            f"speed={state.speed} "
+            f"delete_delay={state.delete_delay} "
+            f"csv_index={state.csv_index} "
+            f"day={state.active_day_name or get_ist_day_name()} "
+            f"title={clean_title}"
+        )
+        if state.state_msg_id:
+            try:
+                await acc1.edit_message("me", state.state_msg_id, text)
+                return
+            except:
+                pass
+        msg = await acc1.send_message("me", text)
+        state.state_msg_id = msg.id
+    except Exception as e:
+        logging.warning(f"Failed to save state for group {chat_id}: {e}")
+
+# Backward compatibility wrappers
+async def load_state_from_telegram():
+    await load_all_states_from_telegram()
     return 0
 
 async def save_state_to_telegram(csv_idx=None):
-    global STATE_MSG_ID, current_csv_index, active_day_name
-    if csv_idx is not None:
-        current_csv_index = csv_idx
-    try:
-        acc1 = clients["acc1"]["client"]
-        text = f"[GunYamazaki State] csv_index={current_csv_index} delete_delay={delete_delay} message_speed={message_speed} day={active_day_name}"
-        if STATE_MSG_ID:
-            await acc1.edit_message("me", STATE_MSG_ID, text)
-        else:
-            msg = await acc1.send_message("me", text)
-            STATE_MSG_ID = msg.id
-    except Exception as e:
-        logging.error(f"Failed to save state to telegram: {e}")
+    pass
 
 def format_seconds_to_readable(seconds):
     if seconds <= 0:
@@ -380,14 +486,14 @@ async def periodic_history_sweeper():
         except Exception as e:
             logging.error(f"Periodic sweeper error: {e}")
 
-async def simulate_typing(client, entity, text):
-    if message_speed <= 1.0:
+async def simulate_typing(client, entity, text, group_speed=15.0):
+    if group_speed <= 1.0:
         return
-    if message_speed <= 5.0:
-        max_type = min(max(message_speed * 0.15, 0.3), 0.8)
+    if group_speed <= 5.0:
+        max_type = min(max(group_speed * 0.15, 0.3), 0.8)
         typing_time = min(max(len(text) * 0.015, 0.25), max_type)
     else:
-        max_type = min(max(message_speed * 0.25, 0.5), 2.5)
+        max_type = min(max(group_speed * 0.25, 0.5), 2.5)
         typing_time = min(max(len(text) * 0.025, 0.4), max_type)
     try:
         async with client.action(entity, 'typing'):
@@ -560,7 +666,6 @@ def setup_commands(bot_client):
     is_acc4 = (bot_client == clients.get("acc4", {}).get("client"))
 
     def should_skip_cmd(event):
-        # Userbot accounts (acc1, acc2, acc3) must NEVER process private DMs!
         if not is_acc4 and event.is_private:
             return True
         msg_id = getattr(event.message, 'id', None)
@@ -575,10 +680,6 @@ def setup_commands(bot_client):
         return False
 
     async def send_bot_reply(event, text, file=None):
-        """
-        Always ensures command responses are sent by the official Bot (acc4 / Gun Yamazaki)
-        so user accounts (acc1) NEVER speak or respond on behalf of the bot!
-        """
         acc4_client = clients.get("acc4", {}).get("client")
         target_client = acc4_client if (acc4_client and acc4_client.is_connected()) else bot_client
         try:
@@ -596,88 +697,159 @@ def setup_commands(bot_client):
             s_id = getattr(getattr(s, 'from_id', None), 'user_id', None)
         return s_id
 
-    def is_super_admin(event):
+    async def get_sender_identity(event):
         s_id = get_sender_id(event)
-        if s_id in SUPER_ADMIN_IDS:
-            return True
-        if event.is_private and (event.chat_id in SUPER_ADMIN_IDS or event.chat_id == "me"):
-            return True
-        return False
+        sender_obj = None
+        try:
+            sender_obj = await event.get_sender()
+        except:
+            pass
+        username = (getattr(sender_obj, 'username', '') or '').lower().lstrip('@')
+        return s_id, username
 
-    def can_control_lock(event):
-        s_id = get_sender_id(event)
-        if s_id in ALL_ADMIN_IDS:
-            return True
-        if event.is_private and (event.chat_id in ALL_ADMIN_IDS or event.chat_id == "me"):
-            return True
-        return False
+    async def are_primary_accounts_in_group(client, chat_id: int) -> bool:
+        try:
+            state = get_group_state(chat_id)
+            has_owner = (5429173364 in state.known_user_ids) or ("merlin_hermis" in state.known_usernames)
+            has_greatlotm = ("greatlotm" in state.known_usernames)
+            if has_owner and has_greatlotm:
+                return True
+                
+            participants = await client.get_participants(chat_id, limit=300)
+            p_ids = set()
+            p_users = set()
+            for p in participants:
+                if getattr(p, 'id', None):
+                    p_ids.add(p.id)
+                    state.known_user_ids.add(p.id)
+                u = (getattr(p, 'username', '') or '').lower().lstrip('@')
+                if u:
+                    p_users.add(u)
+                    state.known_usernames.add(u)
+                    
+            has_owner = (5429173364 in p_ids) or ("merlin_hermis" in p_users)
+            has_greatlotm = ("greatlotm" in p_users)
+            return (has_owner and has_greatlotm)
+        except Exception as e:
+            logging.debug(f"Could not check participants for {chat_id}: {e}")
+            state = get_group_state(chat_id)
+            return (("merlin_hermis" in state.known_usernames or 5429173364 in state.known_user_ids) and 
+                    ("greatlotm" in state.known_usernames))
+
+    async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
+        s_id, username = await get_sender_identity(event)
+        
+        is_owner = (s_id in SUPER_ADMIN_IDS) or (username == "merlin_hermis")
+        is_greatlotm = (username == "greatlotm")
+        is_operator = (s_id in OPERATOR_USER_IDS)
+        
+        # If not authorized at all, completely ignore
+        if not (is_owner or is_greatlotm or is_operator):
+            return False, "Unauthorized account."
+            
+        if event.is_private:
+            if is_owner or is_greatlotm:
+                return True, ""
+            if is_operator:
+                if cmd_name in ["lockon", "lockoff"]:
+                    return True, ""
+                return False, "Operator role is restricted strictly to lockon and lockoff only."
+            return False, "Unauthorized."
+
+        chat_id = event.chat_id
+        probe_client = clients.get("acc1", {}).get("client") or event.client
+        primaries_present = await are_primary_accounts_in_group(probe_client, chat_id)
+        
+        if is_owner or is_greatlotm:
+            return True, ""
+            
+        if is_operator:
+            if cmd_name in ["lockon", "lockoff"]:
+                return True, ""
+            return False, "The fourth account is restricted to lockon and lockoff only."
+            
+        return False, "Unauthorized."
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?stats(?:@genzetabot)?$'))
     async def stats_handler(event):
         if should_skip_cmd(event): return
         try:
-            if can_control_lock(event):
-                status = "🟢 ONLINE" if bot_active else "🔴 OFFLINE"
-                del_str = format_seconds_to_readable(delete_delay)
-                catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
-                catch_status = f"🟢 ONLINE (Gemini AI Vision | Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
-                day_cap = active_day_name.capitalize()
-                await send_bot_reply(event, 
-                    f"📊 **GunYamazaki Stats**\n\n"
-                    f"Status: {status}\n"
-                    f"Speed: {message_speed}s\n"
-                    f"Auto-Delete: {del_str}\n"
-                    f"Auto-Catch: {catch_status}\n"
-                    f"Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
-                    f"CSV Progress: {current_csv_index}/{len(conversation_data)} msgs\n"
-                    f"Live Web Intel: 🟢 ONLINE (Anime, Gaming & Sports RSS)\n"
-                    f"Meme Engine: 🟢 ONLINE (12+ Custom Meme Cards)\n"
-                    f"Messages Sent: {total_messages_sent}"
-                )
-        except: pass
+            allowed, _ = await check_command_auth(event, "stats")
+            if not allowed: return
+            chat_id = event.chat_id
+            state = get_group_state(chat_id)
+            status = "🟢 ONLINE" if state.is_active else "🔴 OFFLINE"
+            del_str = format_seconds_to_readable(state.delete_delay)
+            catch_target = f"{SPAWN_CHAT_TITLE} (`{SPAWN_CHAT_ID}`)" if SPAWN_CHAT_ID else (SPAWN_CHAT_TITLE or "Not Set")
+            catch_status = f"🟢 ONLINE (Chat: {catch_target})" if arise_autocatch_active else "🔴 OFFLINE"
+            day_cap = (state.active_day_name or active_day_name).capitalize()
+            worker_names = [clients[w]["name"] for w in state.active_workers if w in clients]
+            workers_str = ", ".join(worker_names) if worker_names else "Detecting..."
+            
+            await send_bot_reply(event, 
+                f"📊 **GunYamazaki Stats — {state.title}**\n\n"
+                f"• Group Status: {status}\n"
+                f"• Group Speed: **{state.speed}s** (Isolated to this group)\n"
+                f"• Active Workers: {workers_str}\n"
+                f"• Auto-Delete: {del_str}\n"
+                f"• Auto-Catch: {catch_status}\n"
+                f"• Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
+                f"• CSV Progress: {state.csv_index}/{len(conversation_data)} msgs\n"
+                f"• Adult Boy Voice Notes: 🎙 ONLINE (3 Distinct Voices)\n"
+                f"• Live Web Intel: 🟢 ONLINE (Anime, Gaming & Sports RSS)\n"
+                f"• Meme Engine: 🟢 ONLINE (12+ Custom Meme Cards)\n"
+                f"• Total Active Groups: {len([s for s in group_states.values() if s.is_active])}"
+            )
+        except Exception as e:
+            logging.error(f"Error in stats_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:day|dayinfo)(?:@genzetabot)?$'))
     async def day_handler(event):
         if should_skip_cmd(event): return
         try:
-            if is_super_admin(event):
-                day_cap = active_day_name.capitalize()
-                total_msgs = len(conversation_data)
-                await send_bot_reply(event, 
-                    f"📅 **Active Daily Dataset Info**\n\n"
-                    f"• **Current Day:** {day_cap}\n"
-                    f"• **Active CSV:** `{CSV_FILE}`\n"
-                    f"• **Loaded Messages:** {total_msgs:,} Hinglish messages\n"
-                    f"• **Current Index:** {current_csv_index} / {total_msgs}\n"
-                    f"• **Auto-Midnight Rollover:** 🟢 ACTIVE (00:00:00 IST)\n\n"
-                    f"💡 *To switch day manually, send:* `setday monday`, `setday friday`, etc."
-                )
+            allowed, _ = await check_command_auth(event, "day")
+            if not allowed: return
+            state = get_group_state(event.chat_id)
+            day_cap = (state.active_day_name or active_day_name).capitalize()
+            total_msgs = len(conversation_data)
+            await send_bot_reply(event, 
+                f"📅 **Active Daily Dataset Info — {state.title}**\n\n"
+                f"• **Current Day:** {day_cap}\n"
+                f"• **Active CSV:** `{CSV_FILE}`\n"
+                f"• **Loaded Messages:** {total_msgs:,} Hinglish messages\n"
+                f"• **Current Index:** {state.csv_index} / {total_msgs}\n"
+                f"• **Auto-Midnight Rollover:** 🟢 ACTIVE (00:00:00 IST)\n\n"
+                f"💡 *To switch day manually, send:* `setday monday`, `setday friday`, etc."
+            )
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
         if should_skip_cmd(event): return
-        global current_csv_index
         try:
-            if is_super_admin(event):
-                arg = event.pattern_match.group(1)
-                valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-                if not arg or arg.strip().lower() not in valid_days:
-                    days_list = ", ".join(f"`{d}`" for d in valid_days)
-                    await send_bot_reply(event, f"❌ Please specify a valid day!\nAvailable days: {days_list}\nExample: `setday friday`")
-                    return
-                target_day = arg.strip().lower()
-                load_csv(target_day)
-                current_csv_index = 0
-                await save_state_to_telegram(0)
-                await send_bot_reply(event, 
-                    f"✅ **Active Day Switched!**\n\n"
-                    f"• **New Day:** {target_day.capitalize()}\n"
-                    f"• **Loaded CSV:** `{CSV_FILE}`\n"
-                    f"• **Total Messages:** {len(conversation_data):,} rows\n"
-                    f"• **Conversation Index:** Reset to 0"
-                )
-                logging.info(f"Super Admin manually switched active day to {target_day.capitalize()} ({CSV_FILE})")
+            allowed, reason = await check_command_auth(event, "setday")
+            if not allowed:
+                if reason: await send_bot_reply(event, f"❌ {reason}")
+                return
+            state = get_group_state(event.chat_id)
+            arg = event.pattern_match.group(1)
+            valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            if not arg or arg.strip().lower() not in valid_days:
+                days_list = ", ".join(f"`{d}`" for d in valid_days)
+                await send_bot_reply(event, f"❌ Please specify a valid day!\nAvailable days: {days_list}\nExample: `setday friday`")
+                return
+            target_day = arg.strip().lower()
+            state.active_day_name = target_day
+            state.csv_index = 0
+            load_csv(target_day)
+            await save_group_state_to_telegram(event.chat_id)
+            await send_bot_reply(event, 
+                f"✅ **Active Day Switched for {state.title}!**\n\n"
+                f"• **New Day:** {target_day.capitalize()}\n"
+                f"• **Loaded CSV:** `{CSV_FILE}`\n"
+                f"• **Conversation Index:** Reset to 0"
+            )
+            logging.info(f"Day switched to {target_day.capitalize()} for group {event.chat_id}")
         except Exception as e:
             logging.error(f"Error in setday_handler: {e}")
 
@@ -686,9 +858,10 @@ def setup_commands(bot_client):
         if should_skip_cmd(event): return
         global arise_autocatch_active
         try:
-            if is_super_admin(event):
-                arise_autocatch_active = True
-                await send_bot_reply(event, f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
+            allowed, _ = await check_command_auth(event, "ariseon")
+            if not allowed: return
+            arise_autocatch_active = True
+            await send_bot_reply(event, f"✅ Arise Auto-Catcher is now **ONLINE**!\nLocked strictly to: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?ariseoff(?:@genzetabot)?$'))
@@ -696,9 +869,10 @@ def setup_commands(bot_client):
         if should_skip_cmd(event): return
         global arise_autocatch_active
         try:
-            if is_super_admin(event):
-                arise_autocatch_active = False
-                await send_bot_reply(event, "🛑 Arise Auto-Catcher is now **OFFLINE**.")
+            allowed, _ = await check_command_auth(event, "ariseoff")
+            if not allowed: return
+            arise_autocatch_active = False
+            await send_bot_reply(event, "🛑 Arise Auto-Catcher is now **OFFLINE**.")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:arisehere|lockarise)(?:@genzetabot)?$'))
@@ -706,115 +880,133 @@ def setup_commands(bot_client):
         if should_skip_cmd(event): return
         global SPAWN_CHAT_ID, SPAWN_CHAT_TITLE, arise_autocatch_active
         try:
-            if is_super_admin(event):
-                SPAWN_CHAT_ID = event.chat_id
-                arise_autocatch_active = True
-                try:
-                    chat = await event.get_chat()
-                    SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
-                except: pass
-                await send_bot_reply(event, 
-                    f"🎯 **Arise Auto-Catcher LOCKED!**\n\n"
-                    f"Group: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)\n"
-                    f"Status: 🟢 **ONLINE**\n\n"
-                    f"The bot will **ONLY** catch character gates inside this group and ignore all other groups!"
-                )
-                logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
+            allowed, _ = await check_command_auth(event, "arisehere")
+            if not allowed: return
+            SPAWN_CHAT_ID = event.chat_id
+            arise_autocatch_active = True
+            try:
+                chat = await event.get_chat()
+                SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
+            except: pass
+            await send_bot_reply(event, 
+                f"🎯 **Arise Auto-Catcher LOCKED!**\n\n"
+                f"Group: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)\n"
+                f"Status: 🟢 **ONLINE**\n\n"
+                f"The bot will **ONLY** catch character gates inside this group!"
+            )
+            logging.info(f"Arise Auto-Catcher strictly locked to chat {SPAWN_CHAT_ID} ('{SPAWN_CHAT_TITLE}')")
         except: pass
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
         if should_skip_cmd(event): return
-        global bot_active, BOT_ENTITY, TARGET_CHAT_ID, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
         try:
-            if can_control_lock(event):
-                BOT_ENTITY = event.input_chat
-                TARGET_CHAT_ID = event.chat_id
-                SPAWN_CHAT_ID = event.chat_id
-                try:
-                    chat = await event.get_chat()
-                    SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
-                except: pass
-                bot_active = True
-                await send_bot_reply(event, f"🟢 **Locked On!** ({SPAWN_CHAT_TITLE})")
-                logging.info(f"System & Arise Auto-Catcher LOCKED ON to {TARGET_CHAT_ID} ('{SPAWN_CHAT_TITLE}') by admin {get_sender_id(event)}.")
-        except: pass
+            allowed, _ = await check_command_auth(event, "lockon")
+            if not allowed: return
+            chat_id = event.chat_id
+            state = get_group_state(chat_id)
+            try:
+                chat = await event.get_chat()
+                state.title = getattr(chat, 'title', state.title or f"Chat {chat_id}")
+            except: pass
+            
+            workers = await register_and_warmup_group(chat_id, event)
+            state.is_active = True
+            asyncio.create_task(run_group_chat_loop(chat_id))
+            await save_group_state_to_telegram(chat_id)
+            
+            worker_names = [clients[w]["name"] for w in workers if w in clients]
+            workers_str = ", ".join(worker_names) if worker_names else "Account 1, Bot"
+            await send_bot_reply(event, 
+                f"🟢 **Locked On to {state.title}!**\n\n"
+                f"• **Group Speed:** {state.speed}s\n"
+                f"• **Active Workers in Group:** {workers_str}\n"
+                f"• **Auto-Delete:** {format_seconds_to_readable(state.delete_delay)}\n"
+                f"• **Adult Boy Voice Notes:** 🎙 ONLINE (Distinct voices, natural spacing)\n\n"
+                f"💡 *This group runs completely independently. Other groups are unaffected.*"
+            )
+            logging.info(f"System LOCKED ON to {chat_id} ('{state.title}') with workers: {workers}")
+        except Exception as e:
+            logging.error(f"Error in lockon_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockoff(?:@genzetabot)?$'))
     async def lockoff_handler(event):
         if should_skip_cmd(event): return
-        global bot_active
         try:
-            if can_control_lock(event):
-                bot_active = False
-                await send_bot_reply(event, "🛑 **Locked Off.**")
-                logging.info(f"System LOCKED OFF by admin {get_sender_id(event)}.")
-        except: pass
+            allowed, _ = await check_command_auth(event, "lockoff")
+            if not allowed: return
+            chat_id = event.chat_id
+            state = get_group_state(chat_id)
+            state.is_active = False
+            await save_group_state_to_telegram(chat_id)
+            await send_bot_reply(event, f"🛑 **Locked Off.**\n`{state.title}` is now paused. Other groups continue running unaffected.")
+            logging.info(f"System LOCKED OFF in {chat_id} ('{state.title}')")
+        except Exception as e:
+            logging.error(f"Error in lockoff_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
         if should_skip_cmd(event): return
-        global message_speed
         try:
-            if is_super_admin(event):
-                arg = event.pattern_match.group(1)
-                if not arg or not arg.strip():
-                    await send_bot_reply(event, 
-                        f"⚡ **Global Conversation Speed:** 1 message every **{message_speed}s**.\n\n"
-                        f"All accounts (**Account 1, Account 2, Account 3, GunYamazaki**) follow this speed.\n"
-                        f"To change, send: `setspeed 5s`, `setspeed 10s`, `setspeed 15s`, or `setspeed 30s` (slash optional)."
-                    )
-                    return
-                speed_val = parse_time_to_seconds(arg.strip())
-                if speed_val is not None and speed_val > 0:
-                    message_speed = int(speed_val)
-                    await save_state_to_telegram()
-                    await send_bot_reply(event, 
-                        f"⚡ **Speed Updated for ALL Accounts!**\n\n"
-                        f"Every account (**Account 1, Account 2, Account 3, GunYamazaki**) will now send 1 message every **{message_speed} seconds**."
-                    )
-                else:
-                    await send_bot_reply(event, "❌ Invalid speed! Example: `setspeed 5s`, `setspeed 10s`, or `setspeed 15s`.")
+            allowed, reason = await check_command_auth(event, "setspeed")
+            if not allowed:
+                if reason: await send_bot_reply(event, f"❌ {reason}")
+                return
+            chat_id = event.chat_id
+            state = get_group_state(chat_id)
+            arg = event.pattern_match.group(1)
+            if not arg or not arg.strip():
+                await send_bot_reply(event, 
+                    f"⚡ **Speed for {state.title}:** 1 message every **{state.speed}s**.\n\n"
+                    f"This setting is isolated **only** to this group.\n"
+                    f"To change, send: `setspeed 5s`, `setspeed 10s`, `setspeed 15s`, etc."
+                )
+                return
+            speed_val = parse_time_to_seconds(arg.strip())
+            if speed_val is not None and speed_val > 0:
+                state.speed = float(speed_val)
+                await save_group_state_to_telegram(chat_id)
+                await send_bot_reply(event, 
+                    f"⚡ **Speed Updated for {state.title} Only!**\n\n"
+                    f"Messages in this group will now send 1 message every **{state.speed} seconds**.\n"
+                    f"Other groups retain their own independent speed settings."
+                )
+            else:
+                await send_bot_reply(event, "❌ Invalid speed! Example: `setspeed 5s`, `setspeed 10s`, or `setspeed 15s`.")
         except Exception as e:
             logging.error(f"Error in setspeed_handler: {e}")
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setdelete_handler(event):
         if should_skip_cmd(event): return
-        global delete_delay
         try:
-            if is_super_admin(event):
-                arg = event.pattern_match.group(1)
-                if not arg or not arg.strip():
-                    readable = format_seconds_to_readable(delete_delay)
-                    await send_bot_reply(event, 
-                        f"🗑 **Current Auto-Delete:** **{readable}** ({delete_delay}s)\n\n"
-                        f"Super Admin can set this to any duration anytime:\n"
-                        f"• `setdelete 15m` (15 minutes)\n"
-                        f"• `setdelete 1h` (1 hour)\n"
-                        f"• `setdelete 12h` (12 hours)\n"
-                        f"• `setdelete 1d` (1 day)\n"
-                        f"• `setdelete 7days` (7 days)\n"
-                        f"• `setdelete 0` (disable auto-delete)"
-                    )
-                    return
-                raw_val = arg.strip()
-                del_val = parse_time_to_seconds(raw_val)
-                if del_val is not None:
-                    delete_delay = del_val
-                    readable = format_seconds_to_readable(delete_delay)
-                    await save_state_to_telegram()
-                    await send_bot_reply(event, f"🗑 Auto-delete set to **{readable}** ({delete_delay}s) by Super Admin! Starting sweep...")
-                    try:
-                        sweep_client = bot_client if bot_client.is_connected() else clients.get("acc1", {}).get("client")
-                        target = TARGET_CHAT_ID or TARGET_CHAT
-                        if isinstance(target, str) and (target.startswith("-100") or target.lstrip('-').isdigit()):
-                            target = int(target)
-                        entity = await sweep_client.get_entity(target)
-                        asyncio.create_task(history_sweeper(sweep_client, entity, delete_delay))
-                    except: pass
-                else:
-                    await send_bot_reply(event, "❌ Invalid time format! Example: `setdelete 15m`, `setdelete 1h`, `setdelete 7days`, or `setdelete 0`.")
+            allowed, reason = await check_command_auth(event, "setdelete")
+            if not allowed:
+                if reason: await send_bot_reply(event, f"❌ {reason}")
+                return
+            chat_id = event.chat_id
+            state = get_group_state(chat_id)
+            arg = event.pattern_match.group(1)
+            if not arg or not arg.strip():
+                readable = format_seconds_to_readable(state.delete_delay)
+                await send_bot_reply(event, 
+                    f"🗑 **Current Auto-Delete for {state.title}:** **{readable}** ({state.delete_delay}s)\n\n"
+                    f"Examples: `setdelete 15m`, `setdelete 1h`, `setdelete 1d`, `setdelete 0`"
+                )
+                return
+            del_val = parse_time_to_seconds(arg.strip())
+            if del_val is not None:
+                state.delete_delay = del_val
+                readable = format_seconds_to_readable(state.delete_delay)
+                await save_group_state_to_telegram(chat_id)
+                await send_bot_reply(event, f"🗑 Auto-delete set to **{readable}** ({state.delete_delay}s) for **{state.title}** only!")
+                try:
+                    sweep_client = bot_client if bot_client.is_connected() else clients.get("acc1", {}).get("client")
+                    entity = state.cached_entities.get("acc4") or await sweep_client.get_entity(chat_id)
+                    asyncio.create_task(history_sweeper(sweep_client, entity, state.delete_delay))
+                except: pass
+            else:
+                await send_bot_reply(event, "❌ Invalid time format! Example: `setdelete 15m`, `setdelete 1h`, or `setdelete 0`.")
         except Exception as e:
             logging.error(f"Error in setdelete_handler: {e}")
 
@@ -837,9 +1029,10 @@ def setup_commands(bot_client):
                 caption = f"⚡ {meme_title} ⚡\n{punchline}"
                 
             sent_msg = await send_bot_reply(event, caption, file=fpath)
-            if delete_delay > 0 and not event.is_private:
+            state = get_group_state(event.chat_id)
+            if state.delete_delay > 0 and not event.is_private:
                 target_del_client = clients.get("acc4", {}).get("client") or bot_client
-                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, delete_delay))
+                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, state.delete_delay))
         except Exception as e:
             logging.error(f"Error in meme_cmd_handler: {e}")
 
@@ -862,11 +1055,10 @@ def setup_commands(bot_client):
                 response = f"🌐 **Live {cat.capitalize()} News:**\n{headline}"
                 
             sent_msg = await send_bot_reply(event, response)
-            if delete_delay > 0 and not event.is_private:
+            state = get_group_state(event.chat_id)
+            if state.delete_delay > 0 and not event.is_private:
                 target_del_client = clients.get("acc4", {}).get("client") or bot_client
-                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, delete_delay))
-        except Exception as e:
-            logging.error(f"Error in news_cmd_handler: {e}")
+                asyncio.create_task(delete_message_later(target_del_client, event.chat_id, sent_msg.id, state.delete_delay))
         except Exception as e:
             logging.error(f"Error in news_cmd_handler: {e}")
 
@@ -901,7 +1093,19 @@ def setup_commands(bot_client):
             return
 
         if is_group_msg:
-            if TARGET_CHAT_ID and isinstance(TARGET_CHAT_ID, int) and event.chat_id != TARGET_CHAT_ID:
+            state = get_group_state(event.chat_id)
+            s_id = event.sender_id
+            if s_id:
+                state.known_user_ids.add(s_id)
+            try:
+                s_ent = await event.get_sender()
+                u_str = (getattr(s_ent, 'username', '') or '').lower().lstrip('@')
+                if u_str:
+                    state.known_usernames.add(u_str)
+            except: pass
+            
+            # If this group is locked off, do not participate in human chat
+            if not state.is_active:
                 return
             BOT_ENTITY = event.input_chat
             
@@ -1041,7 +1245,7 @@ def setup_commands(bot_client):
                 await simulate_typing(acc4_client, event.chat_id, reply_clean)
                 await acc4_client.send_message(event.chat_id, reply_clean)
             else:
-                target_chat_peer = BOT_ENTITY or TARGET_INPUT_PEER or await speaker_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+                target_chat_peer = event.input_chat
                 asyncio.create_task(send_dynamic_reply(speaker_client, target_chat_peer, event.message, reply_clean))
 
                 # 15% chance to also react with an emoji
@@ -1092,7 +1296,7 @@ async def trigger_anime_news_event(entity):
         recent_chat_history.append(f"Gun Yamazaki: {news_text}")
 
         acc4 = clients["acc4"]["client"]
-        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = entity
         await simulate_typing(acc4, acc4_entity, news_text)
         
         news_msg = await acc4.send_message(acc4_entity, news_text)
@@ -1124,7 +1328,7 @@ async def trigger_anime_news_event(entity):
             recent_ai_replies.append(reply_text)
             recent_chat_history.append(f"{acc['name']}: {reply_text}")
 
-            acc_entity = await acc["client"].get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            acc_entity = entity
             await simulate_typing(acc["client"], acc_entity, reply_text)
                 
             reply_msg = await acc["client"].send_message(acc_entity, reply_text, reply_to=news_msg.id)
@@ -1167,7 +1371,7 @@ async def trigger_meme_event(entity):
         recent_ai_replies.append(caption_text)
         recent_chat_history.append(f"{sharer_name}: [Shared Meme] {caption_text}")
 
-        sharer_entity = BOT_ENTITY or TARGET_INPUT_PEER or await sharer_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        sharer_entity = entity
         await simulate_typing(sharer_client, sharer_entity, "photo")
 
         meme_msg = await sharer_client.send_message(sharer_entity, caption_text, file=fpath)
@@ -1203,7 +1407,7 @@ async def trigger_meme_event(entity):
             recent_ai_replies.append(reaction_text)
             recent_chat_history.append(f"{r_name}: {reaction_text}")
 
-            r_entity = await r_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            r_entity = entity
             await simulate_typing(r_client, r_entity, reaction_text)
             r_msg = await r_client.send_message(r_entity, reaction_text, reply_to=meme_msg.id)
             total_messages_sent += 1
@@ -1244,7 +1448,7 @@ async def trigger_poll_event(entity):
         )
         
         acc4 = clients["acc4"]["client"]
-        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        acc4_entity = entity
         await simulate_typing(acc4, acc4_entity, question)
         poll_msg = await acc4.send_message(acc4_entity, file=poll_media)
         logging.info(f"[Account 4] POLL: {question}")
@@ -1268,7 +1472,7 @@ async def trigger_acc4_ai_reaction(target_entity, reply_to_msg_id, thread_contex
             recent_ai_replies.append(ai_text)
             recent_chat_history.append(f"Account 4: {ai_text}")
             acc4_client = clients["acc4"]["client"]
-            acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            acc4_entity = target_entity
             await simulate_typing(acc4_client, acc4_entity, ai_text)
             ai_sent_msg = await acc4_client.send_message(acc4_entity, ai_text, reply_to=reply_to_msg_id)
             logging.info(f"[Account 4 (Bot)] AI Joined ({lang_mode}): {ai_text}")
@@ -1279,205 +1483,194 @@ async def trigger_acc4_ai_reaction(target_entity, reply_to_msg_id, thread_contex
     except Exception as ai_e:
         logging.warning(f"Account 4 AI participation error: {ai_e}")
 
-async def chat_loop():
-    global bot_active, total_messages_sent, current_csv_index, active_day_name
+async def run_group_chat_loop(chat_id: int):
+    """
+    Independent conversational chat loop for a single group.
+    Runs concurrently with other groups at its own isolated speed.
+    Includes Adult Boy Voice Note engine (3 distinct male voices, natural spacing).
+    """
+    state = get_group_state(chat_id)
+    if state.is_loop_running:
+        return
+    state.is_loop_running = True
+    logging.info(f"🚀 Started independent chat loop for '{state.title}' ({chat_id}) at speed {state.speed}s")
     
-    csv_index = await load_state_from_telegram()
     if not conversation_data:
         load_csv()
-    current_csv_index = csv_index
-    logging.info(f"Resuming conversation from CSV index {csv_index} (Day: {active_day_name.capitalize()}, Dataset: {CSV_FILE})")
-    active_keys = list(clients.keys())
-    message_tracker = {}
-    rate_limited_until = {}
-    cached_entities = {}
-    
-    last_chosen_key = None
-    last_conv_id = None
-    recent_thread_messages = []
-    last_checked_day = active_day_name
-    
-    while True:
+
+    while state.is_active:
         current_time = time.time()
         
-        # Check for midnight day rollover (Aligned to IST Indian Timezone)
-        now_day = get_ist_day_name()
-        if now_day != last_checked_day:
-            logging.info(f"🕛 [Midnight Rollover - IST] Day changed from {last_checked_day} to {now_day}! Hot-reloading today's dataset...")
-            load_csv(now_day, shuffle_threads=True)
-            csv_index = 0
-            current_csv_index = 0
-            last_checked_day = now_day
-            last_conv_id = None
-            message_tracker.clear()
-            recent_thread_messages.clear()
-            asyncio.create_task(save_state_to_telegram(csv_index))
-            logging.info(f"✅ Hot-reloaded {CSV_FILE} ({len(conversation_data):,} messages) for {now_day.capitalize()} with zero downtime.")
+        if not conversation_data:
+            await asyncio.sleep(2)
+            continue
             
-        available_keys = [k for k in active_keys if rate_limited_until.get(k, 0) < current_time]
-
-        # Pause scripted CSV playback while active live conversation with human is ongoing
+        available_workers = [
+            w for w in state.active_workers 
+            if state.rate_limited_until.get(w, 0) < current_time and w in clients
+        ]
+        
+        if not available_workers:
+            await register_and_warmup_group(chat_id)
+            await asyncio.sleep(3)
+            continue
+            
         if current_time < csv_paused_until:
             await asyncio.sleep(1.5)
             continue
-        
-        if bot_active and conversation_data and available_keys:
-            loop_start = time.time()
-            msg_data = conversation_data[csv_index]
-            
-            sender_str = msg_data.get("sender", "").strip()
-            conv_id = msg_data.get("conversation_id", "").strip()
-            msg_text = msg_data.get("message", "...")
-            csv_id = msg_data.get("id", "").strip()
-            reply_to_csv = msg_data.get("reply_to", "").strip()
-            topic = msg_data.get("topic", "general")
-            
-            # Anti-repetition check: Never send the exact same sentence if sent in the last 200 messages
-            clean_text = msg_text.strip().lower()
-            if clean_text and clean_text in recent_sent_dataset_texts and len(clean_text) > 4:
-                csv_index = (csv_index + 1) % len(conversation_data)
-                current_csv_index = csv_index
-                continue
-            recent_sent_dataset_texts.append(clean_text)
-            
-            # Natural pause when switching to a completely new conversation thread
-            if last_conv_id and conv_id and conv_id != last_conv_id:
-                recent_thread_messages.clear()
-                if message_speed <= 3.0:
-                    thread_pause = random.uniform(0.5, 1.2)
-                elif message_speed <= 5.0:
-                    thread_pause = random.uniform(1.0, 2.0)
-                elif message_speed <= 10.0:
-                    thread_pause = random.uniform(2.0, 4.0)
-                else:
-                    thread_pause = min(random.uniform(4.0, 8.0), message_speed * 0.8)
-                logging.info(f"Finished thread {last_conv_id}. Pausing {thread_pause:.1f}s before starting {conv_id}...")
-                await asyncio.sleep(thread_pause)
-            last_conv_id = conv_id
-            
-            # Allow non-linear speaker turns (e.g. acc1 sending 2 consecutive messages)
-            if sender_str in available_keys:
-                chosen_key = sender_str
-            else:
-                chosen_key = random.choice(available_keys)
-                
-            is_same_speaker = (chosen_key == last_chosen_key)
-            last_chosen_key = chosen_key
-                
-            client = clients[chosen_key]["client"]
-            name = clients[chosen_key]["name"]
-            
-            try:
-                if chosen_key not in cached_entities:
-                    if chosen_key == "acc4" and (BOT_ENTITY or TARGET_INPUT_PEER):
-                        cached_entities[chosen_key] = BOT_ENTITY or TARGET_INPUT_PEER
-                    else:
-                        cached_entities[chosen_key] = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                entity = cached_entities[chosen_key]
-                
-                # 3% chance for Live Real-Time Web Intelligence event (Anime, Gaming, Sports RSS)
-                if HAS_GENAI and random.random() < 0.03:
-                    asyncio.create_task(trigger_anime_news_event(entity))
 
-                # 2.5% chance for Autonomous Anime & Gaming Meme Image drop with spicy caption
-                if random.random() < 0.025:
-                    asyncio.create_task(trigger_meme_event(entity))
+        loop_start = time.time()
+        msg_data = conversation_data[state.csv_index]
+        
+        sender_str = msg_data.get("sender", "").strip()
+        conv_id = msg_data.get("conversation_id", "").strip()
+        msg_text = msg_data.get("message", "...")
+        csv_id = msg_data.get("id", "").strip()
+        reply_to_csv = msg_data.get("reply_to", "").strip()
+        topic = msg_data.get("topic", "general")
+        
+        clean_text = msg_text.strip().lower()
+        if clean_text and clean_text in recent_sent_dataset_texts and len(clean_text) > 4:
+            state.csv_index = (state.csv_index + 1) % len(conversation_data)
+            continue
+        recent_sent_dataset_texts.append(clean_text)
+        
+        if state.last_conv_id and conv_id and conv_id != state.last_conv_id:
+            state.recent_thread_messages.clear()
+            thread_pause = min(random.uniform(2.0, 5.0), state.speed * 0.7)
+            await asyncio.sleep(thread_pause)
+        state.last_conv_id = conv_id
+        
+        if sender_str in available_workers:
+            chosen_key = sender_str
+        else:
+            chosen_key = random.choice(available_workers)
+            
+        is_same_speaker = (chosen_key == state.last_chosen_key)
+        state.last_chosen_key = chosen_key
+        
+        client = clients[chosen_key]["client"]
+        name = clients[chosen_key]["name"]
+        
+        try:
+            if chosen_key not in state.cached_entities:
+                state.cached_entities[chosen_key] = await client.get_entity(chat_id)
+            entity = state.cached_entities[chosen_key]
+            
+            reply_msg_id = state.message_tracker.get(reply_to_csv)
+            
+            # =========================================================================
+            # VOICE NOTE ENGINE INTEGRATION (Realistic Adult Male Voice Notes)
+            # =========================================================================
+            # Distinct voices for each boy:
+            # - acc1: Natural adult guy (hi-IN-MadhurNeural, +4% rate)
+            # - acc2: Deeper chill guy (hi-IN-MadhurNeural, -5Hz pitch, -3% rate)
+            # - acc3: Energetic guy (hi-IN-MadhurNeural, +6Hz pitch, +8% rate)
+            # Minimum 15-minute cooldown per group, natural 2.5% chance
+            voice_sent = False
+            if (chosen_key in ["acc1", "acc2", "acc3"] and 
+                (current_time - state.last_voice_time > 900) and 
+                random.random() < 0.025):
+                try:
+                    vn_path, vn_text = await voice_engine.generate_voice_note(
+                        account_key=chosen_key,
+                        context_text=msg_text,
+                        category=topic
+                    )
+                    if vn_path and os.path.exists(vn_path):
+                        await simulate_typing(client, entity, "voice", group_speed=state.speed)
+                        sent_vn = await client.send_file(
+                            entity,
+                            vn_path,
+                            voice_note=True,
+                            reply_to=reply_msg_id
+                        )
+                        state.last_voice_time = time.time()
+                        voice_sent = True
+                        logging.info(f"🎙 [{name}] Sent Realistic Adult Boy Voice Note in '{state.title}': '{vn_text}'")
+                        if state.delete_delay > 0:
+                            asyncio.create_task(delete_message_later(client, entity, sent_vn.id, state.delete_delay))
+                        try: os.remove(vn_path)
+                        except: pass
+                except Exception as ve:
+                    logging.warning(f"Voice note send error in '{state.title}': {ve}")
                     
-                # 2% chance for interactive Poll (non-blocking)
-                if HAS_GENAI and random.random() < 0.02:
-                    asyncio.create_task(trigger_poll_event(entity))
-                    
-                # 1.5% chance for animated sticker or dice
-                if random.random() < 0.015:
-                    emoji_sticker = random.choice(['🎲', '🎯', '🎳', '🔥', '😂', '👍'])
-                    if emoji_sticker in ['🎲', '🎯', '🎳']:
-                        await simulate_typing(client, entity, "sticker")
-                        sent_sticker = await client.send_message(entity, file=InputMediaDice(emoticon=emoji_sticker))
-                    else:
-                        await simulate_typing(client, entity, emoji_sticker)
-                        sent_sticker = await client.send_message(entity, emoji_sticker)
-                    logging.info(f"[{name}] Sent Animated Sticker: {emoji_sticker}")
-                    total_messages_sent += 1
-                    if delete_delay > 0:
-                        asyncio.create_task(delete_message_later(client, entity, sent_sticker.id, delete_delay))
-                
-                # Find reply_to message id in active group
-                reply_msg_id = None
-                if reply_to_csv and reply_to_csv in message_tracker:
-                    reply_msg_id = message_tracker[reply_to_csv]
-                
-                if msg_text in ["[Photo]", "[Sticker]", "[Video]", "[GIF]"]:
-                    msg_text = "✨"
-                    
-                await simulate_typing(client, entity, msg_text)
-                
+            if not voice_sent:
+                await simulate_typing(client, entity, msg_text, group_speed=state.speed)
                 try:
                     sent_msg = await client.send_message(entity, msg_text, reply_to=reply_msg_id)
                 except Exception:
                     sent_msg = await client.send_message(entity, msg_text)
-                
-                # IMMEDIATELY advance csv_index right here so no secondary error can cause repeats!
-                csv_index = (csv_index + 1) % len(conversation_data)
-                current_csv_index = csv_index
-                total_messages_sent += 1
-                
-                try:
-                    logging.info(f"[{name}] ({topic}): {msg_text}")
-                    recent_thread_messages.append(f"{name}: {msg_text}")
-                    recent_chat_history.append(f"{name}: {msg_text}")
-                    if len(recent_thread_messages) > 6:
-                        recent_thread_messages.pop(0)
                     
-                    if csv_id:
-                        message_tracker[csv_id] = sent_msg.id
-                        if len(message_tracker) > 1000:
-                            message_tracker.pop(next(iter(message_tracker)))
-                    
-                    if delete_delay > 0:
-                        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, delete_delay))
+                if csv_id:
+                    state.message_tracker[csv_id] = sent_msg.id
+                    if len(state.message_tracker) > 500:
+                        state.message_tracker.pop(next(iter(state.message_tracker)))
                         
-                    # Account 4 AI Context-Aware Participation (10% chance, non-blocking background task)
-                    if HAS_GENAI and random.random() < 0.10 and "acc4" in clients and len(recent_thread_messages) >= 2:
-                        asyncio.create_task(trigger_acc4_ai_reaction(entity, sent_msg.id, list(recent_thread_messages), topic))
+                if state.delete_delay > 0:
+                    asyncio.create_task(delete_message_later(client, entity, sent_msg.id, state.delete_delay))
                     
-                    if csv_index % 10 == 0:
-                        asyncio.create_task(save_state_to_telegram(csv_index))
-                except Exception as post_err:
-                    logging.warning(f"Post-message processing warning: {post_err}")
-            except FloodWaitError as e:
-                cached_entities.pop(chosen_key, None)
-                logging.warning(f"[{name}] Rate limited! Pausing this account for {e.seconds}s")
-                rate_limited_until[chosen_key] = current_time + e.seconds
-                try:
-                    if "acc4" in clients:
-                        acc4_client = clients["acc4"]["client"]
-                        acc4_entity = BOT_ENTITY or TARGET_INPUT_PEER or await acc4_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
-                        await acc4_client.send_message(acc4_entity, f"⚠️ **Warning**: {name} is sending messages too fast and got rate-limited by Telegram! Pausing them for {e.seconds} seconds.")
-                except: pass
-                continue
-            except ConnectionError as e:
-                cached_entities.pop(chosen_key, None)
-                logging.error(f"Connection dropped! Pausing for 5s to reconnect: {e}")
-                await asyncio.sleep(5)
-            except Exception as e:
-                cached_entities.pop(chosen_key, None)
-                logging.error(f"Error sending message: {e}")
-                await asyncio.sleep(3)
-                
-            # Realistic variable pacing:
-            # - If same speaker sends 2 consecutive lines: fast burst scaled to message_speed
-            # - If different speakers: accurate cadence centered around message_speed
-            elapsed = time.time() - loop_start
-            if is_same_speaker:
-                burst_target = min(message_speed * 0.4, 2.0)
-                sleep_duration = max(0.3, burst_target - elapsed)
-            else:
-                target_interval = message_speed * random.uniform(0.95, 1.05)
-                sleep_duration = max(0.2, target_interval - elapsed)
-                
-            await asyncio.sleep(sleep_duration)
-        else:
+                state.recent_thread_messages.append(f"{name}: {msg_text}")
+                if len(state.recent_thread_messages) > 6:
+                    state.recent_thread_messages.pop(0)
+
+            # Advance index for this group
+            state.csv_index = (state.csv_index + 1) % len(conversation_data)
+            
+            if state.csv_index % 10 == 0:
+                asyncio.create_task(save_group_state_to_telegram(chat_id))
+
+        except FloodWaitError as fe:
+            state.cached_entities.pop(chosen_key, None)
+            state.rate_limited_until[chosen_key] = current_time + fe.seconds
+            logging.warning(f"[{name}] Rate limited in '{state.title}' for {fe.seconds}s")
             await asyncio.sleep(2)
+            continue
+        except Exception as e:
+            state.cached_entities.pop(chosen_key, None)
+            logging.error(f"Error in chat loop for '{state.title}': {e}")
+            await asyncio.sleep(3)
+            
+        elapsed = time.time() - loop_start
+        if is_same_speaker:
+            burst_target = min(state.speed * 0.4, 2.0)
+            sleep_duration = max(0.3, burst_target - elapsed)
+        else:
+            target_interval = state.speed * random.uniform(0.95, 1.05)
+            sleep_duration = max(0.2, target_interval - elapsed)
+            
+        await asyncio.sleep(sleep_duration)
+        
+    state.is_loop_running = False
+    logging.info(f"🛑 Chat loop ended for '{state.title}' ({chat_id})")
+
+async def chat_loop_supervisor():
+    """
+    Multi-tenant group supervisor: monitors active groups, handles midnight day rollover,
+    and runs independent conversation loops for all active groups concurrently.
+    """
+    logging.info("Multi-tenant chat supervisor started. Monitoring active groups...")
+    last_checked_day = get_ist_day_name()
+    while True:
+        try:
+            now_day = get_ist_day_name()
+            if now_day != last_checked_day:
+                logging.info(f"🕛 [Midnight Rollover - IST] Day changed to {now_day}! Hot-reloading dataset...")
+                load_csv(now_day, shuffle_threads=True)
+                last_checked_day = now_day
+                for cid, st in list(group_states.items()):
+                    st.csv_index = 0
+                    st.active_day_name = now_day
+                    asyncio.create_task(save_group_state_to_telegram(cid))
+                    
+            # Check all active groups and ensure their loop is running
+            for cid, st in list(group_states.items()):
+                if st.is_active and not st.is_loop_running:
+                    logging.info(f"Supervisor starting loop for active group '{st.title}' ({cid})")
+                    asyncio.create_task(run_group_chat_loop(cid))
+        except Exception as e:
+            logging.error(f"Supervisor error: {e}")
+        await asyncio.sleep(10)
 
 async def dummy_server():
     try:
@@ -1534,7 +1727,7 @@ async def background_reconnect_account(key, cfg, wait_seconds):
             
         clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
         logging.info(f"🎉 [{cfg['name']}] Background reconnect successful! Account is now ONLINE.")
-        if key in ("acc4", "acc1"):
+        if key == "acc4":
             setup_commands(client)
         asyncio.create_task(client.run_until_disconnected())
     except Exception as e:
@@ -1673,10 +1866,8 @@ async def main():
             logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
 
     if "acc4" in clients:
+        logging.info("Registering official admin commands strictly on Account 4 (Bot).")
         setup_commands(clients["acc4"]["client"])
-    if "acc1" in clients:
-        logging.info("Registering group message listener and admin commands on Account 1.")
-        setup_commands(clients["acc1"]["client"])
 
     # Warm up human accounts entity cache safely
     for key, c in clients.items():
@@ -1775,8 +1966,9 @@ async def main():
 
                 await handle_spawn_message(event)
     logging.info(f"Arise Auto-Catcher listener registered! Locked to: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
-    # Run conversation loop as a background task!
-    asyncio.create_task(chat_loop())
+    # Restore per-group isolated states & launch multi-group chat supervisor!
+    await load_all_states_from_telegram()
+    asyncio.create_task(chat_loop_supervisor())
     
     # 3. Keep all account connections alive
     while True:
