@@ -2120,7 +2120,12 @@ async def main():
     # Start web server for Render
     await dummy_server()
     
-    for key, cfg in accounts.items():
+    # 1. Connect Account 4 (Official Bot) FIRST so commands and Jarvis Q&A are live instantly
+    account_order = ["acc4", "acc1", "acc2", "acc3"]
+    for key in account_order:
+        if key not in accounts:
+            continue
+        cfg = accounts[key]
         session_str = cfg.get("session")
         bot_token = cfg.get("bot_token")
         api_id = cfg["api_id"]
@@ -2130,23 +2135,9 @@ async def main():
             continue
             
         connected = False
-        for attempt in range(1, 6):
+        for attempt in range(1, 4):
             try:
-                if session_str:
-                    client = TelegramClient(StringSession(session_str), api_id, api_hash)
-                    await client.start()
-                    try:
-                        me = await client.get_me()
-                        uid = me.id if me else cfg.get("user_id")
-                    except Exception:
-                        uid = cfg.get("user_id")
-                    if uid:
-                        OUR_USER_IDS.add(uid)
-                    clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
-                    logging.info(f"Connected {cfg['name']} (ID: {uid}) via Session String.")
-                    connected = True
-                    break
-                elif bot_token and key == "acc4":
+                if bot_token and key == "acc4":
                     client = TelegramClient(StringSession(), api_id, api_hash)
                     await client.start(bot_token=bot_token)
                     try:
@@ -2158,19 +2149,37 @@ async def main():
                         OUR_USER_IDS.add(uid)
                     clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
                     logging.info(f"Connected {cfg['name']} (ID: {uid}) via Bot Token.")
+                    # IMMEDIATELY register official admin commands and Jarvis conversational listener!
+                    logging.info("⚡ Registering official admin commands & Jarvis listener on Account 4 (Bot) IMMEDIATELY.")
+                    setup_commands(client)
+                    connected = True
+                    break
+                elif session_str:
+                    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                    await client.start()
+                    try:
+                        me = await client.get_me()
+                        uid = me.id if me else cfg.get("user_id")
+                    except Exception:
+                        uid = cfg.get("user_id")
+                    if uid:
+                        OUR_USER_IDS.add(uid)
+                    clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
+                    logging.info(f"Connected {cfg['name']} (ID: {uid}) via Session String.")
+                    if key == "acc1":
+                        setup_commands(client)
                     connected = True
                     break
             except FloodWaitError as e:
                 if e.seconds > 60:
-                    logging.warning(f"⚠️ Telegram Rate Limit! {cfg['name']} has FloodWait of {e.seconds}s (~{e.seconds // 60}m). Launching background reconnect so startup is NOT blocked!")
+                    logging.warning(f"⚠️ Telegram Rate Limit! {cfg['name']} has FloodWait of {e.seconds}s. Launching background reconnect.")
                     asyncio.create_task(background_reconnect_account(key, cfg, e.seconds))
                     break
                 else:
-                    logging.warning(f"Telegram Rate Limit! {cfg['name']} must wait {e.seconds}s before logging in. Sleeping...")
-                    await asyncio.sleep(e.seconds + 2)
+                    await asyncio.sleep(min(e.seconds + 2, 10))
             except Exception as e:
-                logging.warning(f"[{cfg['name']}] Connection attempt {attempt}/5 failed ({e}). Telegram servers may have temporary issues. Retrying in 5 seconds...")
-                await asyncio.sleep(5)
+                logging.warning(f"[{cfg['name']}] Connection attempt {attempt}/3 failed: {e}. Retrying in 2 seconds...")
+                await asyncio.sleep(2)
                 
         if not connected and not any(k == key for k in clients):
             logging.error(f"[{cfg['name']}] Skipped or queued in background. Continuing startup with other accounts.")
@@ -2182,11 +2191,10 @@ async def main():
         acc1_client = clients["acc1"]["client"]
         target_resolved = False
         
-        # Step 1: Pre-fetch dialogs so Telethon caches all groups and channels
+        # Step 1: Pre-fetch limited dialogs with a fast timeout so Telethon never hangs
         dialogs = []
         try:
-            dialogs = await acc1_client.get_dialogs(limit=100)
-            # Check if any dialog matches the target chat ID (-1003529827660)
+            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=25), timeout=8.0)
             for d in dialogs:
                 if d.is_group or d.is_channel:
                     d_peer_id = utils.get_peer_id(d.entity)
@@ -2202,7 +2210,7 @@ async def main():
                         target_resolved = True
                         break
         except Exception as de:
-            logging.warning(f"Dialog pre-fetch warning: {de}")
+            logging.debug(f"Dialog pre-fetch non-fatal warning: {de}")
 
         # Step 2: If not resolved yet, try numeric TARGET_CHAT or non-invite username
         if not target_resolved:
@@ -2221,7 +2229,7 @@ async def main():
                     TARGET_CHAT_ID = utils.get_peer_id(entity)
                     target_resolved = True
             except Exception as te:
-                logging.warning(f"Could not resolve TARGET_CHAT string: {te}")
+                logging.debug(f"Could not resolve TARGET_CHAT string: {te}")
 
         # Step 3: Title-based search in dialogs fallback
         if not target_resolved and dialogs:
@@ -2241,17 +2249,10 @@ async def main():
                             target_resolved = True
                             break
             except Exception as dialog_err:
-                logging.error(f"Dialog title search fallback error: {dialog_err}")
+                logging.debug(f"Dialog title search fallback error: {dialog_err}")
                 
         if not target_resolved and TARGET_CHAT_ID:
             logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
-
-    if "acc4" in clients:
-        logging.info("Registering official admin commands on Account 4 (Bot).")
-        setup_commands(clients["acc4"]["client"])
-    if "acc1" in clients:
-        logging.info("Registering slash-free command listener on Account 1.")
-        setup_commands(clients["acc1"]["client"])
 
     # Warm up human accounts entity cache safely
     for key, c in clients.items():
