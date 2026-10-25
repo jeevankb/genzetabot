@@ -30,6 +30,13 @@ data/bot.db
 scratch/
 chat_log.txt
 
+# Media and analysis scratch
+*.mp4
+*.webm
+hexa_frames/
+video_analysis.txt
+*.session
+
 # OS & Editor files
 .DS_Store
 Thumbs.db

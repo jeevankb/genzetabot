@@ -3,21 +3,45 @@ import asyncio
 import logging
 import time
 import re
+import random
 
 JIKAN_API_URL = "https://api.jikan.moe/v4/seasons/now"
 ANILIST_API_URL = "https://graphql.anilist.co"
 
-# In-memory cache for seasonal anime
+# In-memory cache for seasonal anime (Current & Trending 2025/2026)
 _SEASONAL_ANIME_CACHE = [
-    {"title": "Bleach: Thousand-Year Blood War - The Conflict", "episodes": 13, "genres": ["Action", "Supernatural"]},
-    {"title": "Mushoku Tensei III", "episodes": 12, "genres": ["Fantasy", "Adventure"]},
-    {"title": "Youjo Senki II", "episodes": 12, "genres": ["Action", "Military"]},
+    {"title": "Solo Leveling Season 2: Arise from the Shadow", "episodes": 13, "genres": ["Action", "Fantasy"]},
+    {"title": "Dandadan", "episodes": 12, "genres": ["Action", "Supernatural", "Comedy"]},
     {"title": "Sakamoto Days", "episodes": 12, "genres": ["Action", "Comedy"]},
-    {"title": "Solo Leveling Season 2", "episodes": 13, "genres": ["Action", "Fantasy"]},
-    {"title": "Dandadan", "episodes": 12, "genres": ["Action", "Supernatural"]},
+    {"title": "Chainsaw Man - The Movie: Reze Arc", "episodes": 1, "genres": ["Action", "Supernatural"]},
+    {"title": "Bleach: Thousand-Year Blood War - The Conflict", "episodes": 13, "genres": ["Action", "Supernatural"]},
+    {"title": "Demon Slayer: Infinity Castle Arc Movie Trilogy", "episodes": 3, "genres": ["Action", "Demons"]},
+    {"title": "Dragon Ball Daima", "episodes": 20, "genres": ["Action", "Adventure"]},
+    {"title": "Kaiju No. 8", "episodes": 12, "genres": ["Action", "Sci-Fi"]},
+    {"title": "One Piece - Egghead Island & Elbaf Arc", "episodes": 50, "genres": ["Action", "Adventure"]},
     {"title": "Blue Lock vs. U-20 Japan", "episodes": 14, "genres": ["Sports"]},
-    {"title": "Chainsaw Man - The Movie: Reze Arc", "episodes": 1, "genres": ["Action", "Supernatural"]}
+    {"title": "Wind Breaker", "episodes": 13, "genres": ["Action", "School"]},
+    {"title": "Jujutsu Kaisen Season 3: Culling Game", "episodes": 24, "genres": ["Action", "Dark Fantasy"]},
+    {"title": "Frieren: Beyond Journey's End", "episodes": 28, "genres": ["Fantasy", "Drama"]},
+    {"title": "Oshi no Ko Season 2", "episodes": 13, "genres": ["Drama", "Supernatural"]},
+    {"title": "Re:Zero Season 3", "episodes": 16, "genres": ["Isekai", "Psychological"]},
+    {"title": "Lookism & Omniscient Reader's Viewpoint", "episodes": 12, "genres": ["Action", "Webtoon"]}
 ]
+
+# Trending Action Games (Current & Trending 2025/2026)
+_TRENDING_GAMES_CACHE = [
+    {"title": "GTA 6 (Grand Theft Auto VI)", "genre": "Open World / Action"},
+    {"title": "Black Myth: Wukong", "genre": "Action RPG / Souls-like"},
+    {"title": "Elden Ring: Shadow of the Erdtree", "genre": "Dark Fantasy RPG"},
+    {"title": "Monster Hunter Wilds", "genre": "Action Hunting"},
+    {"title": "Valorant (VCT & Ranked)", "genre": "Tactical FPS"},
+    {"title": "BGMI / PUBG Mobile", "genre": "Battle Royale"},
+    {"title": "Counter-Strike 2 (CS2)", "genre": "Competitive FPS"},
+    {"title": "Marvel Rivals", "genre": "Hero Shooter"},
+    {"title": "Tekken 8", "genre": "Fighting"},
+    {"title": "Call of Duty: Black Ops 6", "genre": "Action FPS"}
+]
+
 _LAST_FETCH = 0
 CACHE_TTL = 43200  # 12 hours
 
@@ -54,6 +78,17 @@ async def fetch_seasonal_anime():
 
     # Fallback return existing cache
     return _SEASONAL_ANIME_CACHE
+
+def fetch_trending_topic():
+    """
+    Returns a random trending anime or game topic with its type ('anime' or 'game').
+    """
+    if random.random() < 0.6:
+        item = random.choice(_SEASONAL_ANIME_CACHE)
+        return item["title"], "anime"
+    else:
+        item = random.choice(_TRENDING_GAMES_CACHE)
+        return item["title"], "game"
 
 def detect_language_mode(text_samples):
     """
