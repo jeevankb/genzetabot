@@ -4,6 +4,7 @@ import logging
 import time
 import re
 import random
+import xml.etree.ElementTree as ET
 
 JIKAN_API_URL = "https://api.jikan.moe/v4/seasons/now"
 ANILIST_API_URL = "https://graphql.anilist.co"
@@ -89,6 +90,59 @@ def fetch_trending_topic():
     else:
         item = random.choice(_TRENDING_GAMES_CACHE)
         return item["title"], "game"
+
+_LIVE_WEB_CACHE = []
+_LAST_LIVE_FETCH = 0
+LIVE_CACHE_TTL = 1800  # 30 minutes
+
+LIVE_FEEDS = [
+    ("anime", "https://news.google.com/rss/search?q=anime+movie+OR+season+release+when:3d&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("gaming", "https://news.google.com/rss/search?q=gaming+GTA+or+Valorant+or+PlayStation+or+Xbox+when:3d&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("sports", "https://news.google.com/rss/search?q=cricket+India+match+OR+squad+when:2d&hl=en-IN&gl=IN&ceid=IN:en")
+]
+
+async def fetch_live_web_intel():
+    """
+    Fetches real-time live breaking news headlines across Anime, Gaming, and Indian Sports via RSS.
+    Returns: dict with 'title', 'category', 'source'.
+    """
+    global _LIVE_WEB_CACHE, _LAST_LIVE_FETCH
+    current_time = time.time()
+    if _LIVE_WEB_CACHE and (current_time - _LAST_LIVE_FETCH) < LIVE_CACHE_TTL:
+        return random.choice(_LIVE_WEB_CACHE)
+
+    category, feed_url = random.choice(LIVE_FEEDS)
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(feed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    xml_text = await resp.text()
+                    root = ET.fromstring(xml_text)
+                    items = root.findall('.//item')[:10]
+                    cleaned_news = []
+                    for it in items:
+                        raw_title = it.find('title')
+                        if raw_title is not None and raw_title.text:
+                            # Strip publisher suffix (e.g. " - IGN", " - Crunchyroll")
+                            clean_t = re.sub(r'\s*-\s*[^-]+$', '', raw_title.text).strip()
+                            if len(clean_t) > 12:
+                                cleaned_news.append({
+                                    "title": clean_t,
+                                    "category": category,
+                                    "source": "web"
+                                })
+                    if cleaned_news:
+                        _LIVE_WEB_CACHE = cleaned_news
+                        _LAST_LIVE_FETCH = current_time
+                        logging.info(f"Successfully fetched {len(cleaned_news)} live {category} news items from web.")
+                        return random.choice(cleaned_news)
+    except Exception as e:
+        logging.warning(f"Live web intel fetch error: {e}")
+
+    # Fallback to local trending topic cache if network fails
+    fallback_title, fallback_cat = fetch_trending_topic()
+    return {"title": fallback_title, "category": fallback_cat, "source": "cache"}
 
 def detect_language_mode(text_samples):
     """

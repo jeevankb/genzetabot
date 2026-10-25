@@ -25,7 +25,8 @@ from telethon.tl.types import ReactionEmoji, InputMediaPoll, Poll, PollAnswer, I
 
 # Load environment variables FIRST
 load_dotenv()
-from dynamic_intel import fetch_seasonal_anime, detect_language_mode, get_account4_system_prompt, fetch_trending_topic
+from dynamic_intel import fetch_seasonal_anime, detect_language_mode, get_account4_system_prompt, fetch_trending_topic, fetch_live_web_intel
+import meme_engine
 import base64
 _FB_K = base64.b64decode("QVEuQWI4Uk42TDFkSndhSXhjbndoODVJUGhQQ0VLQUxlbkRWLTlrZndSYWxybWlQU05YLXc=").decode()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY") or _FB_K
@@ -611,6 +612,8 @@ def setup_commands(bot_client):
                     f"Auto-Catch: {catch_status}\n"
                     f"Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
                     f"CSV Progress: {current_csv_index}/{len(conversation_data)} msgs\n"
+                    f"Live Web Intel: 🟢 ONLINE (Anime, Gaming & Sports RSS)\n"
+                    f"Meme Engine: 🟢 ONLINE (12+ Custom Meme Cards)\n"
                     f"Messages Sent: {total_messages_sent}"
                 )
         except: pass
@@ -797,6 +800,54 @@ def setup_commands(bot_client):
         except Exception as e:
             logging.error(f"Error in setdelete_handler: {e}")
 
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:meme|memes)(?:@genzetabot)?(?:\s+(.+))?$'))
+    async def meme_cmd_handler(event):
+        if should_skip_cmd(event): return
+        try:
+            fpath, meme_info = meme_engine.get_random_meme()
+            meme_title = meme_info.get("title", "Meme")
+            punchline = meme_info.get("punchline", "")
+            
+            prompt_caption = (
+                f"You are Gun Yamazaki (@genzetabot). A friend asked for a meme in Telegram. "
+                f"Meme title: '{meme_title}'. Punchline context: '{punchline}'. "
+                f"Write 1 short, hilarious, natural Hinglish caption or roast for this meme (e.g. 'ye lo bhai ek fresh meme 😂', 'literally us in every match 💀'). "
+                f"1 short line. No hashtags."
+            )
+            caption = await generate_gemini_text(prompt_caption, recent_replies=recent_ai_replies)
+            if not caption:
+                caption = f"⚡ {meme_title} ⚡\n{punchline}"
+                
+            sent_msg = await event.reply(caption, file=fpath)
+            if delete_delay > 0 and not event.is_private:
+                asyncio.create_task(delete_message_later(bot_client, event.chat_id, sent_msg.id, delete_delay))
+        except Exception as e:
+            logging.error(f"Error in meme_cmd_handler: {e}")
+
+    @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:news|intel|breaking)(?:@genzetabot)?$'))
+    async def news_cmd_handler(event):
+        if should_skip_cmd(event): return
+        try:
+            intel = await fetch_live_web_intel()
+            headline = intel.get("title", "")
+            cat = intel.get("category", "general")
+            
+            prompt_news = (
+                f"You are Gun Yamazaki (@genzetabot). A friend asked for live breaking news. "
+                f"Latest real-time headline: '{headline}' (Category: {cat}). "
+                f"Give a casual, witty, spicy 1-2 sentence Hinglish breakdown of this news to the group. "
+                f"Keep it authentic and natural. No hashtags."
+            )
+            response = await generate_gemini_text(prompt_news, recent_replies=recent_ai_replies)
+            if not response:
+                response = f"🌐 **Live {cat.capitalize()} News:**\n{headline}"
+                
+            sent_msg = await event.reply(response)
+            if delete_delay > 0 and not event.is_private:
+                asyncio.create_task(delete_message_later(bot_client, event.chat_id, sent_msg.id, delete_delay))
+        except Exception as e:
+            logging.error(f"Error in news_cmd_handler: {e}")
+
     @bot_client.on(events.NewMessage())
     async def auto_delete_handler(event):
         global BOT_ENTITY
@@ -811,7 +862,8 @@ def setup_commands(bot_client):
             "/setdelete", "setdelete", "/autodelete", "autodelete", "/setdel", "setdel", "/delete", "delete",
             "/setspeed", "setspeed", "/speed", "speed",
             "/stats", "stats", "/arise", "arise", "/day", "day", "/setday", "setday",
-            "/ariseon", "ariseon", "/ariseoff", "ariseoff", "/arisehere", "arisehere", "/lockarise", "lockarise"
+            "/ariseon", "ariseon", "/ariseoff", "ariseoff", "/arisehere", "arisehere", "/lockarise", "lockarise",
+            "/meme", "meme", "/news", "news", "/intel", "intel"
         )):
             return
 
@@ -997,29 +1049,25 @@ async def trigger_anime_news_event(entity):
     global total_messages_sent
     if not HAS_GENAI or "acc4" not in clients: return
     try:
-        logging.info("Triggering Seasonal Anime / Gaming Event...")
-        topic_title, topic_type = fetch_trending_topic()
+        logging.info("Triggering Live Real-Time Web Intelligence Event...")
+        intel = await fetch_live_web_intel()
+        topic_title = intel.get("title", "")
+        topic_type = intel.get("category", "anime")
         
-        if topic_type == "game":
-            prompt_news = (
-                f"You are a casual Indian gamer in a Telegram group chat with friends. "
-                f"Mention something exciting, a debate, or an update about the game '{topic_title}'. "
-                f"Write 1 short sentence in natural, casual Hinglish (Roman Hindi + English, e.g. 'bhai {topic_title} ka naya update dekha? insane lag raha h'). "
-                f"Do not use hashtags or quotes."
-            )
-            fallback_text = f"bhai {topic_title} kisine try kiya kya? mast chal raha h"
-        else:
-            prompt_news = (
-                f"You are a casual Indian anime fan in a Telegram group chat with friends. "
-                f"Mention something exciting about the currently airing or upcoming anime '{topic_title}'. "
-                f"Write 1 short sentence in natural, casual Hinglish (Roman Hindi + English, e.g. 'bhai {topic_title} ka next episode kab aayega pata h kya?'). "
-                f"Do not use hashtags or quotes."
-            )
-            fallback_text = f"bhai {topic_title} ka latest episode dekha kisine? animation mast chal raha h"
+        if not topic_title:
+            topic_title, topic_type = fetch_trending_topic()
 
+        cat_desc = "live real-time gaming news" if topic_type == "gaming" else ("live Indian sports/cricket update" if topic_type == "sports" else "breaking seasonal anime news")
+
+        prompt_news = (
+            f"You are Gun Yamazaki (@genzetabot), chilling in a Telegram group with your 3 close Indian friends. "
+            f"You just saw this {cat_desc}: '{topic_title}'. "
+            f"Drop this news naturally into the chat in casual, witty Hinglish (Roman Hindi + English slang, e.g. 'bhai abhi news dekhi: {topic_title}, ye kya chal raha h 😂', 'suno be: {topic_title}'). "
+            f"Write 1 short sentence maximum. No hashtags, no quotes around your reply."
+        )
         news_text = await generate_gemini_text(prompt_news, recent_replies=recent_ai_replies)
         if not news_text:
-            news_text = fallback_text
+            news_text = f"bhai abhi news dekhi: {topic_title}... crazy scene chal raha h 😂"
             
         recent_ai_replies.append(news_text)
         recent_chat_history.append(f"Gun Yamazaki: {news_text}")
@@ -1029,7 +1077,7 @@ async def trigger_anime_news_event(entity):
         await simulate_typing(acc4, acc4_entity, news_text)
         
         news_msg = await acc4.send_message(acc4_entity, news_text)
-        logging.info(f"[Account 4] SEASONAL HINGLISH: {news_text}")
+        logging.info(f"[Account 4] LIVE WEB INTEL ({topic_type.upper()}): {news_text}")
         total_messages_sent += 1
         if delete_delay > 0:
             asyncio.create_task(delete_message_later(acc4, entity, news_msg.id, delete_delay))
@@ -1040,19 +1088,19 @@ async def trigger_anime_news_event(entity):
         random.shuffle(active_accs)
         
         for acc in active_accs[:2]:
-            if random.random() < 0.5:
+            if random.random() < 0.6:
                 try:
-                    emoji = random.choice(["🔥", "👀", "💯", "😂"])
+                    emoji = random.choice(["🔥", "👀", "💯", "😂", "💀", "🤯"])
                     await acc["client"](SendReactionRequest(peer=entity, msg_id=news_msg.id, reaction=[ReactionEmoji(emoticon=emoji)]))
                 except: pass
                 
             prompt_reply = (
-                f"You are an Indian friend replying to: '{news_text}'. "
-                f"Give a short 1-sentence reply in natural casual Hinglish (e.g. 'hn kal hi dekha maine', 'ruk spoiler mat dena', 'sahi me')."
+                f"You are {acc['name']}, an Indian friend replying to Gun Yamazaki who just dropped this news: '{news_text}'. "
+                f"Give a short 1-sentence reply in natural casual Hinglish (e.g. 'sahi me? mai bhi dekh raha tha', 'ruk link bhej zara', 'haha ye toh hona hi tha')."
             )
             reply_text = await generate_gemini_text(prompt_reply, recent_replies=recent_ai_replies)
             if not reply_text:
-                reply_text = random.choice(["hn maine bhi dekha tha", "ruk spoiler mat de abhi", "aaj raat ko dekhunga"])
+                reply_text = random.choice(["sahi me? mast news h ye toh", "ruk link check karta hu", "haha ye toh expected tha"])
                 
             recent_ai_replies.append(reply_text)
             recent_chat_history.append(f"{acc['name']}: {reply_text}")
@@ -1061,7 +1109,7 @@ async def trigger_anime_news_event(entity):
             await simulate_typing(acc["client"], acc_entity, reply_text)
                 
             reply_msg = await acc["client"].send_message(acc_entity, reply_text, reply_to=news_msg.id)
-            logging.info(f"[{acc['name']}] REACTS: {reply_text}")
+            logging.info(f"[{acc['name']}] REACTS TO NEWS: {reply_text}")
             total_messages_sent += 1
             if delete_delay > 0:
                 asyncio.create_task(delete_message_later(acc["client"], entity, reply_msg.id, delete_delay))
@@ -1069,7 +1117,83 @@ async def trigger_anime_news_event(entity):
             await asyncio.sleep(random.uniform(2.5, 5.0))
             
     except Exception as e:
-        logging.error(f"Anime News Event Failed: {e}")
+        logging.error(f"Live Web Intel Event Failed: {e}")
+
+async def trigger_meme_event(entity):
+    global total_messages_sent
+    if not clients: return
+    try:
+        logging.info("Triggering Autonomous Anime & Gaming Meme Event...")
+        fpath, meme_info = meme_engine.get_random_meme()
+        if not fpath or not os.path.exists(fpath):
+            return
+
+        sharer_key = random.choice(list(clients.keys()))
+        sharer_client = clients[sharer_key]["client"]
+        sharer_name = clients[sharer_key]["name"]
+
+        meme_title = meme_info.get("title", "Meme")
+        punchline = meme_info.get("punchline", "")
+
+        prompt_caption = (
+            f"You are {sharer_name}, dropping this funny anime/gaming meme in your Telegram friend group. "
+            f"Meme title: '{meme_title}'. Punchline context: '{punchline}'. "
+            f"Write 1 short, hilarious, natural Hinglish caption or roast (Roman Hindi + English, e.g. 'bhai ye meme dekh ke bilkul tum logo ki yaad aa gayi 💀', 'literally us in every match 😂'). "
+            f"Keep it 1 short punchy line. No hashtags."
+        )
+        caption_text = await generate_gemini_text(prompt_caption, recent_replies=recent_ai_replies)
+        if not caption_text:
+            caption_text = f"bhai ye meme dekh ke hassi nhi ruk rahi meri 😂"
+
+        recent_ai_replies.append(caption_text)
+        recent_chat_history.append(f"{sharer_name}: [Shared Meme] {caption_text}")
+
+        sharer_entity = BOT_ENTITY or TARGET_INPUT_PEER or await sharer_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+        await simulate_typing(sharer_client, sharer_entity, "photo")
+
+        meme_msg = await sharer_client.send_message(sharer_entity, caption_text, file=fpath)
+        logging.info(f"[{sharer_name}] SENT MEME: {meme_title} -> {caption_text}")
+        total_messages_sent += 1
+
+        if delete_delay > 0:
+            asyncio.create_task(delete_message_later(sharer_client, entity, meme_msg.id, delete_delay))
+
+        # Friends react with laughter emojis and follow-up roast
+        await asyncio.sleep(random.uniform(2.5, 5.0))
+        reactor_keys = [k for k in clients.keys() if k != sharer_key]
+        random.shuffle(reactor_keys)
+
+        for r_key in reactor_keys[:2]:
+            r_client = clients[r_key]["client"]
+            r_name = clients[r_key]["name"]
+
+            if random.random() < 0.7:
+                try:
+                    emoji = random.choice(["😂", "💀", "🤣", "🔥"])
+                    await r_client(SendReactionRequest(peer=entity, msg_id=meme_msg.id, reaction=[ReactionEmoji(emoticon=emoji)]))
+                except: pass
+
+            prompt_reaction = (
+                f"You are {r_name}, replying to your friend {sharer_name} who just sent this funny meme: '{caption_text}'. "
+                f"Give 1 short natural laughing comeback or roast in casual Hinglish (e.g. 'bhai sach me 💀', 'tu chup kar tera hi haal h ye 😂', 'dead fr')."
+            )
+            reaction_text = await generate_gemini_text(prompt_reaction, recent_replies=recent_ai_replies)
+            if not reaction_text:
+                reaction_text = random.choice(["bhai dead 💀😂", "sahi me yaar haha", "tera hi photo lag raha h ye 💀"])
+
+            recent_ai_replies.append(reaction_text)
+            recent_chat_history.append(f"{r_name}: {reaction_text}")
+
+            r_entity = await r_client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
+            await simulate_typing(r_client, r_entity, reaction_text)
+            r_msg = await r_client.send_message(r_entity, reaction_text, reply_to=meme_msg.id)
+            total_messages_sent += 1
+            if delete_delay > 0:
+                asyncio.create_task(delete_message_later(r_client, entity, r_msg.id, delete_delay))
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+
+    except Exception as me_err:
+        logging.error(f"Error in trigger_meme_event: {me_err}")
 
 async def trigger_poll_event(entity):
     global total_messages_sent
@@ -1232,9 +1356,13 @@ async def chat_loop():
                         cached_entities[chosen_key] = await client.get_entity(TARGET_CHAT_ID or TARGET_CHAT)
                 entity = cached_entities[chosen_key]
                 
-                # 3% chance for Account 4 to trigger live Seasonal anime news (non-blocking)
+                # 3% chance for Live Real-Time Web Intelligence event (Anime, Gaming, Sports RSS)
                 if HAS_GENAI and random.random() < 0.03:
                     asyncio.create_task(trigger_anime_news_event(entity))
+
+                # 2.5% chance for Autonomous Anime & Gaming Meme Image drop with spicy caption
+                if random.random() < 0.025:
+                    asyncio.create_task(trigger_meme_event(entity))
                     
                 # 2% chance for interactive Poll (non-blocking)
                 if HAS_GENAI and random.random() < 0.02:
