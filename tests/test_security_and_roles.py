@@ -188,6 +188,7 @@ class TestOrdinaryUserConversationalAccess(unittest.TestCase):
 
     def test_ordinary_user_can_use_conversational_ai(self):
         """Ordinary user gets conversational AI turns in group."""
+        bot_persistence.reset_group_state(6001)
         ctx = get_or_create_group_context(6001, "Chat Group")
         ctx.add_history_turn("Alice", "user", "What is the capital of Japan?")
         ctx.add_history_turn("GenzetaBot", "assistant", "Tokyo, bro!")

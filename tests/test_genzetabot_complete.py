@@ -173,6 +173,7 @@ class TestConfigurationPersistence(unittest.TestCase):
         bot_persistence.STATE_FILE = self.orig_file
 
     def test_save_and_reload_persistence(self):
+        bot_persistence.reset_group_state(4001)
         ctx = get_or_create_group_context(4001, "Persistent Group")
         ctx.speed = 52.5
         ctx.delete_delay = 1200

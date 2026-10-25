@@ -16,6 +16,7 @@ import time
 import collections
 from PIL import Image
 from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Set, Tuple
 import voice_engine
 import bot_persistence
 
@@ -312,16 +313,37 @@ class GroupState:
     # Group-isolated conversation history (multi-turn memory)
     conversation_history: list = field(default_factory=list)
 
+    loop_task: Optional[asyncio.Task] = None
+
     def add_history_turn(self, sender_name: str, role: str, text: str):
+        """
+        Adds a conversational turn to memory and persists to SQLite.
+        Time Complexity: O(1) in-memory + O(log n) indexed SQLite B-Tree insert.
+        Space Complexity: O(1) per turn.
+        """
         self.conversation_history.append({"sender": sender_name, "role": role, "text": text})
         if len(self.conversation_history) > 20:
             self.conversation_history.pop(0)
+        try:
+            ctx = bot_persistence.get_or_create_group_context(self.chat_id, self.title)
+            ctx.add_history_turn(sender_name, role, text)
+        except Exception:
+            pass
 
     def get_recent_dialogue_context(self, max_turns: int = 6) -> str:
-        recent = self.conversation_history[-max_turns:]
-        if not recent:
-            return "(No previous context in this group)"
-        return "\n".join(f"{t.get('sender', 'User')}: {t.get('text', '')}" for t in recent)
+        """
+        Retrieves recent turns via indexed SQLite query with in-memory fallback.
+        Time Complexity: O(log n + k) using (chat_id, id DESC) index.
+        Space Complexity: O(k) bounded by max_turns.
+        """
+        try:
+            ctx = bot_persistence.get_or_create_group_context(self.chat_id, self.title)
+            return ctx.get_recent_dialogue_context(max_turns)
+        except Exception:
+            recent = self.conversation_history[-max_turns:]
+            if not recent:
+                return "(No previous context in this group)"
+            return "\n".join(f"{t.get('sender', 'User')}: {t.get('text', '')}" for t in recent)
 
 group_states: dict[int, GroupState] = {}
 
@@ -512,6 +534,8 @@ async def load_all_states_from_telegram():
                 st.speed = ctx.speed
                 st.delete_delay = ctx.delete_delay
                 st.voice_replies_enabled = ctx.voice_replies_enabled
+                st.voice_cooldown = ctx.voice_cooldown
+                st.voice_probability = ctx.voice_probability
                 st.csv_index = ctx.csv_index
                 st.active_day_name = ctx.active_day_name
                 st.state_msg_id = ctx.state_msg_id
@@ -1077,7 +1101,8 @@ def setup_commands(bot_client):
             workers = await register_and_warmup_group(chat_id, event)
             state.is_active = True
             state.automation_active = True
-            asyncio.create_task(run_group_chat_loop(chat_id))
+            if not state.is_loop_running:
+                state.loop_task = asyncio.create_task(run_group_chat_loop(chat_id))
             await save_group_state_to_telegram(chat_id)
 
             worker_names = [clients[w]["name"] for w in workers if w in clients]
@@ -1104,6 +1129,9 @@ def setup_commands(bot_client):
             state = get_group_state(chat_id)
             state.is_active = False
             state.automation_active = False
+            if hasattr(state, 'loop_task') and state.loop_task and not state.loop_task.done():
+                state.loop_task.cancel()
+            state.is_loop_running = False
             await save_group_state_to_telegram(chat_id)
             await send_bot_reply(event, 
                 f"🛑 **Automation Locked Off.**\n"
@@ -1975,6 +2003,10 @@ async def run_group_chat_loop(chat_id: int):
             logging.warning(f"[{name}] Rate limited in '{state.title}' for {fe.seconds}s")
             await asyncio.sleep(2)
             continue
+        except asyncio.CancelledError:
+            logging.info(f"🛑 Chat loop cancelled for '{state.title}' ({chat_id})")
+            state.is_loop_running = False
+            return
         except Exception as e:
             state.cached_entities.pop(chosen_key, None)
             logging.error(f"Error in chat loop for '{state.title}': {e}")
@@ -2321,15 +2353,13 @@ async def main():
     # Restore per-group isolated states & launch multi-group chat supervisor!
     await load_all_states_from_telegram()
     
-    # If no groups were previously saved as active, initialize TARGET_CHAT_ID so bot starts talking!
-    active_count = len([s for s in group_states.values() if s.is_active])
-    if active_count == 0 and TARGET_CHAT_ID:
-        default_state = get_group_state(TARGET_CHAT_ID, SPAWN_CHAT_TITLE)
-        default_state.is_active = True
-        default_state.speed = message_speed
-        logging.info(f"Default group '{default_state.title}' ({TARGET_CHAT_ID}) activated at speed {default_state.speed}s.")
-        asyncio.create_task(register_and_warmup_group(TARGET_CHAT_ID))
-        asyncio.create_task(run_group_chat_loop(TARGET_CHAT_ID))
+    # Restore automated chat loops ONLY for groups that were persisted as active!
+    # Never force default groups to active on reboot to strictly preserve lockoff and custom settings.
+    for cid, st in list(group_states.items()):
+        if st.is_active and st.automation_active and not st.is_loop_running:
+            logging.info(f"Restoring automated chat loop for active group '{st.title}' ({cid})")
+            asyncio.create_task(register_and_warmup_group(cid))
+            st.loop_task = asyncio.create_task(run_group_chat_loop(cid))
 
     asyncio.create_task(chat_loop_supervisor())
     
