@@ -33,12 +33,14 @@ chat_log.txt
 # Media and analysis scratch
 *.mp4
 *.webm
+*.mp3
 hexa_frames/
 video_analysis.txt
 *.session
 voices/*.ogg
 voices/*.mp3
 voices/*.wav
+
 
 # OS & Editor files
 .DS_Store

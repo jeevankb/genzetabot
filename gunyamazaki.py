@@ -281,18 +281,35 @@ async def register_and_warmup_group(chat_id: int, event=None) -> list[str]:
             pass
 
     detected = []
+    peer_hint = getattr(event, 'input_chat', None) or getattr(event, 'chat', None)
     # Test human user accounts (acc1, acc2, acc3)
     for key in ["acc1", "acc2", "acc3"]:
         if key in clients:
             cl = clients[key]["client"]
             try:
-                ent = await cl.get_entity(chat_id)
+                if peer_hint and key == "acc1":
+                    ent = peer_hint
+                else:
+                    try:
+                        ent = await cl.get_input_entity(chat_id)
+                    except:
+                        ent = await cl.get_entity(chat_id)
                 state.cached_entities[key] = ent
                 detected.append(key)
                 logging.info(f"[{clients[key]['name']}] Verified & cached for '{state.title}' ({chat_id})")
             except Exception as e:
-                logging.warning(f"[{clients[key]['name']}] Cannot access chat {chat_id} ({e})")
-                state.cached_entities.pop(key, None)
+                # If direct entity resolution fails, check dialogs
+                try:
+                    dialogs = await cl.get_dialogs(limit=50)
+                    for d in dialogs:
+                        if d.id == chat_id or utils.get_peer_id(d.entity) == chat_id:
+                            state.cached_entities[key] = d.input_entity
+                            detected.append(key)
+                            logging.info(f"[{clients[key]['name']}] Resolved from dialogs for '{state.title}' ({chat_id})")
+                            break
+                except:
+                    logging.warning(f"[{clients[key]['name']}] Cannot access chat {chat_id} ({e})")
+                    state.cached_entities.pop(key, None)
 
     # acc4 (Official Bot)
     if "acc4" in clients:
@@ -681,14 +698,25 @@ def setup_commands(bot_client):
 
     async def send_bot_reply(event, text, file=None):
         acc4_client = clients.get("acc4", {}).get("client")
-        target_client = acc4_client if (acc4_client and acc4_client.is_connected()) else bot_client
+        # Try sending through acc4 (the Bot)
+        if acc4_client and acc4_client.is_connected():
+            try:
+                # If bot has the entity or can send directly
+                target = getattr(event, 'input_chat', None) or event.chat_id
+                if file:
+                    return await acc4_client.send_message(target, text, file=file, reply_to=event.message.id)
+                else:
+                    return await acc4_client.send_message(target, text, reply_to=event.message.id)
+            except Exception as e:
+                logging.debug(f"acc4 direct send failed ({e}), falling back to event reply")
+        # Reliable fallback: event.reply always succeeds
         try:
             if file:
-                return await target_client.send_message(event.chat_id, text, file=file, reply_to=event.message.id)
+                return await event.reply(text, file=file)
             else:
-                return await target_client.send_message(event.chat_id, text, reply_to=event.message.id)
-        except Exception:
-            return await event.reply(text, file=file)
+                return await event.reply(text)
+        except Exception as e2:
+            logging.error(f"send_bot_reply all fallbacks failed: {e2}")
 
     def get_sender_id(event):
         s_id = getattr(event, 'sender_id', None)
@@ -1727,7 +1755,7 @@ async def background_reconnect_account(key, cfg, wait_seconds):
             
         clients[key] = {"client": client, "name": cfg["name"], "user_id": uid}
         logging.info(f"🎉 [{cfg['name']}] Background reconnect successful! Account is now ONLINE.")
-        if key == "acc4":
+        if key in ("acc4", "acc1"):
             setup_commands(client)
         asyncio.create_task(client.run_until_disconnected())
     except Exception as e:
@@ -1866,8 +1894,11 @@ async def main():
             logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
 
     if "acc4" in clients:
-        logging.info("Registering official admin commands strictly on Account 4 (Bot).")
+        logging.info("Registering official admin commands on Account 4 (Bot).")
         setup_commands(clients["acc4"]["client"])
+    if "acc1" in clients:
+        logging.info("Registering slash-free command listener on Account 1.")
+        setup_commands(clients["acc1"]["client"])
 
     # Warm up human accounts entity cache safely
     for key, c in clients.items():
@@ -1968,6 +1999,17 @@ async def main():
     logging.info(f"Arise Auto-Catcher listener registered! Locked to: '{SPAWN_CHAT_TITLE}' (ID: {SPAWN_CHAT_ID})")
     # Restore per-group isolated states & launch multi-group chat supervisor!
     await load_all_states_from_telegram()
+    
+    # If no groups were previously saved as active, initialize TARGET_CHAT_ID so bot starts talking!
+    active_count = len([s for s in group_states.values() if s.is_active])
+    if active_count == 0 and TARGET_CHAT_ID:
+        default_state = get_group_state(TARGET_CHAT_ID, SPAWN_CHAT_TITLE)
+        default_state.is_active = True
+        default_state.speed = message_speed
+        logging.info(f"Default group '{default_state.title}' ({TARGET_CHAT_ID}) activated at speed {default_state.speed}s.")
+        asyncio.create_task(register_and_warmup_group(TARGET_CHAT_ID))
+        asyncio.create_task(run_group_chat_loop(TARGET_CHAT_ID))
+
     asyncio.create_task(chat_loop_supervisor())
     
     # 3. Keep all account connections alive
