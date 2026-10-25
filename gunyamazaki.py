@@ -1184,7 +1184,13 @@ def setup_commands(bot_client):
             if not arg:
                 await send_bot_reply(event, f"⏱ **Group Automated Speed:** {state.speed}s\nDefault interval is 45s (40–60s range). Use `setspeed 50` to change.")
                 return
-            new_speed = float(arg)
+            # Strip trailing 's', 'sec', 'seconds' safely
+            clean_arg = re.sub(r'(?i)\s*(?:s|secs?|seconds?)?$', '', arg).strip()
+            try:
+                new_speed = float(clean_arg)
+            except ValueError:
+                await send_bot_reply(event, "⚠️ Invalid speed format! Example: `setspeed 5`, `setspeed 10s`, or `setspeed 45`.")
+                return
             if new_speed < 1.0 or new_speed > 300.0:
                 await send_bot_reply(event, "⚠️ Speed must be between 1 and 300 seconds.")
                 return
