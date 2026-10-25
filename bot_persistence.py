@@ -13,6 +13,8 @@ STATE_FILE = os.path.join(DATA_DIR, "genzetabot_state.json")
 DEFAULT_AUTOMATION_SPEED = 45.0
 DEFAULT_DELETE_DELAY = 900
 DEFAULT_VOICE_REPLIES = True
+DEFAULT_VOICE_COOLDOWN = 900.0     # 15 minutes default cooldown for automated voice notes
+DEFAULT_VOICE_PROBABILITY = 0.025  # 2.5% default chance per turn
 
 @dataclass
 class GroupContext:
@@ -25,6 +27,8 @@ class GroupContext:
     speed: float = DEFAULT_AUTOMATION_SPEED
     delete_delay: int = DEFAULT_DELETE_DELAY
     voice_replies_enabled: bool = DEFAULT_VOICE_REPLIES
+    voice_cooldown: float = DEFAULT_VOICE_COOLDOWN
+    voice_probability: float = DEFAULT_VOICE_PROBABILITY
     csv_index: int = 0
     active_day_name: str = ""
     # Multi-turn conversation memory (strictly isolated to this group)
@@ -100,6 +104,8 @@ def load_local_state() -> Dict[int, GroupContext]:
                 speed=float(gdata.get("speed", DEFAULT_AUTOMATION_SPEED)),
                 delete_delay=int(gdata.get("delete_delay", DEFAULT_DELETE_DELAY)),
                 voice_replies_enabled=bool(gdata.get("voice_replies_enabled", True)),
+                voice_cooldown=float(gdata.get("voice_cooldown", DEFAULT_VOICE_COOLDOWN)),
+                voice_probability=float(gdata.get("voice_probability", DEFAULT_VOICE_PROBABILITY)),
                 csv_index=int(gdata.get("csv_index", 0)),
                 active_day_name=gdata.get("active_day_name", ""),
                 conversation_history=gdata.get("conversation_history", []),
@@ -142,6 +148,8 @@ async def sync_group_to_telegram_cloud(client, chat_id: int):
             f"speed={ctx.speed} "
             f"del={ctx.delete_delay} "
             f"voice={1 if ctx.voice_replies_enabled else 0} "
+            f"vcd={int(ctx.voice_cooldown)} "
+            f"vprob={ctx.voice_probability} "
             f"csv={ctx.csv_index} "
             f"day={ctx.active_day_name} "
             f"title={clean_title}"
@@ -192,6 +200,10 @@ async def restore_from_telegram_cloud(client):
                                         ctx.delete_delay = int(v)
                                     elif k == "voice":
                                         ctx.voice_replies_enabled = (v in ("1", "true", "True"))
+                                    elif k == "vcd":
+                                        ctx.voice_cooldown = float(v)
+                                    elif k == "vprob":
+                                        ctx.voice_probability = float(v)
                                     elif k == "csv":
                                         ctx.csv_index = int(v)
                                     elif k == "day":
@@ -213,6 +225,8 @@ def reset_group_state(chat_id: int):
     ctx.speed = DEFAULT_AUTOMATION_SPEED
     ctx.delete_delay = DEFAULT_DELETE_DELAY
     ctx.voice_replies_enabled = DEFAULT_VOICE_REPLIES
+    ctx.voice_cooldown = DEFAULT_VOICE_COOLDOWN
+    ctx.voice_probability = DEFAULT_VOICE_PROBABILITY
     ctx.csv_index = 0
     ctx.conversation_history.clear()
     ctx.voice_history.clear()
