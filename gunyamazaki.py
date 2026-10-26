@@ -746,18 +746,23 @@ async def send_dynamic_reply(client, entity, target_msg, text):
 def setup_commands(bot_client):
     is_acc4 = (bot_client == clients.get("acc4", {}).get("client"))
 
-    def should_skip_cmd(event):
+    async def should_skip_cmd(event):
         if not is_acc4 and event.is_private:
             return True
         # STRICT GROUP RESTRICTION: Block any commands in unauthorized groups
         if event.is_group or event.is_channel:
             c_title = ""
-            try:
-                c_title = getattr(event.chat, 'title', '')
-            except: pass
-            if not is_allowed_group(event.chat_id, c_title):
-                logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
-                return True
+            if event.chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID):
+                ALLOWED_GROUP_IDS.add(event.chat_id)
+            else:
+                try:
+                    chat = await event.get_chat()
+                    c_title = (getattr(chat, 'title', '') or '').strip()
+                except Exception:
+                    c_title = (getattr(event.chat, 'title', '') or '').strip()
+                if not is_allowed_group(event.chat_id, c_title):
+                    logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
+                    return True
         msg_id = getattr(event.message, 'id', None)
         if not msg_id:
             return False
@@ -861,7 +866,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?stats(?:@genzetabot)?$'))
     async def stats_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "stats")
             if not allowed: return
@@ -891,7 +896,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:day|dayinfo)(?:@genzetabot)?$'))
     async def day_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "day")
             if not allowed: return
@@ -911,7 +916,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, reason = await check_command_auth(event, "setday")
             if not allowed:
@@ -941,7 +946,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockon(?:@genzetabot)?$'))
     async def lockon_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "lockon")
             if not allowed: return
@@ -979,7 +984,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?lockoff(?:@genzetabot)?$'))
     async def lockoff_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "lockoff")
             if not allowed: return
@@ -1002,7 +1007,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?resetgroup(?:@genzetabot)?$'))
     async def resetgroup_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "resetgroup")
             if not allowed: return
@@ -1024,7 +1029,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setspeed_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, _ = await check_command_auth(event, "setspeed")
             if not allowed: return
@@ -1057,7 +1062,7 @@ def setup_commands(bot_client):
         Only explicitly authorized Super Administrators can execute this.
         Adjusts automated voice-note frequency per-group independently.
         """
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, reason = await check_command_auth(event, "setvoicefreq")
             if not allowed:
@@ -1120,7 +1125,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:setdelete|autodelete|setdel|delete)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setdelete_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             allowed, reason = await check_command_auth(event, "setdelete")
             if not allowed:
@@ -1154,7 +1159,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:meme|memes)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def meme_cmd_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             fpath, meme_info = meme_engine.get_random_meme()
             meme_title = meme_info.get("title", "Meme")
@@ -1180,7 +1185,7 @@ def setup_commands(bot_client):
 
     @bot_client.on(events.NewMessage(pattern=r'(?i)^/?(?:news|intel|breaking)(?:@genzetabot)?$'))
     async def news_cmd_handler(event):
-        if should_skip_cmd(event): return
+        if await should_skip_cmd(event): return
         try:
             intel = await fetch_live_web_intel()
             headline = intel.get("title", "")
@@ -1734,8 +1739,18 @@ async def run_group_chat_loop(chat_id: int):
         ]
         
         if not available_workers:
-            await register_and_warmup_group(chat_id)
-            await asyncio.sleep(3)
+            cooldowns = [
+                state.rate_limited_until[w] - current_time 
+                for w in state.active_workers 
+                if state.rate_limited_until.get(w, 0) > current_time
+            ]
+            if cooldowns:
+                sleep_wait = max(2.0, min(min(cooldowns), 30.0))
+                logging.info(f"⏳ [Telegram Anti-Flood Cooldown] Accounts cooling down. Waiting silently for {int(sleep_wait)}s...")
+                await asyncio.sleep(sleep_wait)
+            else:
+                await register_and_warmup_group(chat_id)
+                await asyncio.sleep(3)
             continue
 
         loop_start = time.time()
@@ -1782,8 +1797,8 @@ async def run_group_chat_loop(chat_id: int):
         if not chosen_key or chosen_key not in available_workers:
             chosen_key = random.choice(available_workers)
 
-        # Prevent the exact same worker from replying to themselves when multiple workers exist
-        if chosen_key == state.last_chosen_key and len(available_workers) > 1 and reply_to_csv:
+        # Always rotate workers when multiple exist to prevent the same account from triggering Telegram flood limits
+        if chosen_key == state.last_chosen_key and len(available_workers) > 1:
             alt_workers = [w for w in available_workers if w != state.last_chosen_key]
             if alt_workers:
                 chosen_key = random.choice(alt_workers)
@@ -1872,8 +1887,8 @@ async def run_group_chat_loop(chat_id: int):
         except FloodWaitError as fe:
             state.cached_entities.pop(chosen_key, None)
             state.rate_limited_until[chosen_key] = current_time + fe.seconds
-            logging.warning(f"[{name}] Rate limited in '{state.title}' for {fe.seconds}s")
-            await asyncio.sleep(2)
+            logging.warning(f"⚠️ [{name}] Rate limited by Telegram in '{state.title}' for {fe.seconds}s. Failing over to another account immediately...")
+            await asyncio.sleep(1.0)
             continue
         except asyncio.CancelledError:
             logging.info(f"🛑 Chat loop cancelled for '{state.title}' ({chat_id})")
@@ -1886,13 +1901,13 @@ async def run_group_chat_loop(chat_id: int):
             
         elapsed = time.time() - loop_start
         if state.speed <= 5.0:
-            sleep_duration = max(0.05, state.speed - elapsed)
+            sleep_duration = max(1.0, state.speed - elapsed)
         elif is_same_speaker:
-            burst_target = min(state.speed * 0.4, 2.0)
-            sleep_duration = max(0.2, burst_target - elapsed)
+            burst_target = min(state.speed * 0.5, 3.0)
+            sleep_duration = max(1.0, burst_target - elapsed)
         else:
             target_interval = state.speed * random.uniform(0.95, 1.05)
-            sleep_duration = max(0.2, target_interval - elapsed)
+            sleep_duration = max(1.0, target_interval - elapsed)
             
         await asyncio.sleep(sleep_duration)
         
@@ -2070,14 +2085,15 @@ async def main():
     global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY, ALLOWED_GROUP_IDS
     BOT_ENTITY = None
     TARGET_INPUT_PEER = None
-    if "acc1" in clients:
-        acc1_client = clients["acc1"]["client"]
-        target_resolved = False
+    target_resolved = False
+    for resolver_key in ["acc1", "acc2", "acc3"]:
+        if resolver_key not in clients or target_resolved:
+            continue
+        r_client = clients[resolver_key]["client"]
         
-        # Step 1: Pre-fetch limited dialogs and look for the allowed target group ("jamghat" / "joker")
-        dialogs = []
+        # Step 1: Pre-fetch dialogs and look for the allowed target group ("jamghat" / "joker")
         try:
-            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=30), timeout=8.0)
+            dialogs = await asyncio.wait_for(r_client.get_dialogs(limit=100), timeout=10.0)
             for d in dialogs:
                 if d.is_group or d.is_channel:
                     d_title = (getattr(d, 'title', '') or "").strip().lower()
@@ -2089,11 +2105,11 @@ async def main():
                         if hasattr(entity, 'access_hash'):
                             from telethon.tl.types import InputPeerChannel
                             TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
-                        logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                        logging.info(f"🎯 [Target Chat] Directly resolved from {clients[resolver_key]['name']} dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
                         target_resolved = True
                         break
         except Exception as de:
-            logging.debug(f"Dialog pre-fetch non-fatal warning: {de}")
+            logging.debug(f"Dialog pre-fetch non-fatal warning on {resolver_key}: {de}")
 
         # Step 2: Try resolving invite link (https://t.me/+noVnALjR8Uw1OWU1)
         if not target_resolved:
@@ -2106,7 +2122,7 @@ async def main():
                 try:
                     from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
                     from telethon.tl.types import ChatInviteAlready, ChatInvite
-                    c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest(inv_h)), timeout=8.0)
+                    c_res = await asyncio.wait_for(r_client(CheckChatInviteRequest(inv_h)), timeout=8.0)
                     if hasattr(c_res, 'chat'):
                         entity = c_res.chat
                         d_peer_id = utils.get_peer_id(entity)
@@ -2120,7 +2136,7 @@ async def main():
                         break
                     elif hasattr(c_res, 'title'):
                         try:
-                            imp = await acc1_client(ImportChatInviteRequest(inv_h))
+                            imp = await r_client(ImportChatInviteRequest(inv_h))
                             if imp.chats:
                                 entity = imp.chats[0]
                                 d_peer_id = utils.get_peer_id(entity)
@@ -2131,19 +2147,19 @@ async def main():
                         except Exception:
                             pass
                 except Exception as ce:
-                    logging.debug(f"Invite check non-fatal: {ce}")
+                    logging.debug(f"Invite check non-fatal on {resolver_key}: {ce}")
 
         # Step 3: Numeric TARGET_CHAT fallback (excluding legacy -1003529827660)
         if not target_resolved:
             try:
                 target_str = str(TARGET_CHAT).strip()
                 if (target_str.startswith("-100") or target_str.lstrip('-').isdigit()) and target_str != "-1003529827660":
-                    entity = await acc1_client.get_entity(int(target_str))
+                    entity = await r_client.get_entity(int(target_str))
                     TARGET_CHAT_ID = utils.get_peer_id(entity)
                     ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
                     target_resolved = True
             except Exception as te:
-                logging.debug(f"Could not resolve TARGET_CHAT string: {te}")
+                logging.debug(f"Could not resolve TARGET_CHAT string on {resolver_key}: {te}")
                 
         if not target_resolved and TARGET_CHAT_ID:
             logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
