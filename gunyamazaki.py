@@ -215,6 +215,63 @@ active_day_name = "monday"
 CSV_FILE = "conversations_monday.csv"
 worker_rate_limited_until = {}
 processed_cmd_msg_ids = set()
+cached_entities = {}
+
+async def get_client_entity(client_key: str):
+    """
+    Retrieves and caches the target supergroup entity for a specific client.
+    Ensures that access_hash is present in the client's session database.
+    """
+    global TARGET_CHAT_ID
+    if client_key in cached_entities and cached_entities[client_key] is not None:
+        return cached_entities[client_key]
+
+    acc = clients.get(client_key)
+    if not acc or not acc.get("client") or not acc["client"].is_connected():
+        return None
+    cl = acc["client"]
+
+    # 1. Dialogs pre-fetch (best method in Telethon to populate entity and access hash)
+    try:
+        dialogs = await asyncio.wait_for(cl.get_dialogs(limit=50), timeout=8.0)
+        for d in dialogs:
+            if d.is_group or d.is_channel:
+                d_id = getattr(d, 'id', None)
+                ent = getattr(d, 'entity', None)
+                ent_id = getattr(ent, 'id', None)
+                d_title = (getattr(d, 'title', '') or "").strip().lower()
+
+                is_target = (
+                    d_id in ALLOWED_GROUP_IDS or
+                    ent_id in ALLOWED_GROUP_IDS or
+                    (TARGET_CHAT_ID and (d_id == TARGET_CHAT_ID or ent_id == TARGET_CHAT_ID)) or
+                    any(kw in d_title for kw in ["jamghat", "joker"])
+                )
+                if is_target:
+                    target_ent = ent if ent is not None else d
+                    cached_entities[client_key] = target_ent
+                    if d_id:
+                        ALLOWED_GROUP_IDS.add(d_id)
+                    if ent_id:
+                        ALLOWED_GROUP_IDS.add(ent_id)
+                    if not TARGET_CHAT_ID and (d_id or ent_id):
+                        TARGET_CHAT_ID = d_id or ent_id
+                    logging.info(f"🎯 [{acc.get('name', client_key)}] Pre-warmed group entity: '{getattr(d, 'title', '')}'")
+                    return target_ent
+    except Exception as de:
+        logging.debug(f"Dialog fetch notice for {client_key}: {de}")
+
+    # 2. Try direct get_entity with TARGET_CHAT_ID
+    if TARGET_CHAT_ID:
+        try:
+            ent = await asyncio.wait_for(cl.get_entity(TARGET_CHAT_ID), timeout=5.0)
+            if ent:
+                cached_entities[client_key] = ent
+                return ent
+        except Exception:
+            pass
+
+    return None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STICKERS_DIR = os.path.join(SCRIPT_DIR, "stickers")
@@ -380,65 +437,89 @@ async def chat_loop():
             # Select worker: check rate limits and failover if speaker is rate-limited
             now = time.time()
             chosen_key = speaker_key
-            if worker_rate_limited_until.get(chosen_key, 0) > now:
-                # Find available backup worker
+            if worker_rate_limited_until.get(chosen_key, 0) > now or chosen_key not in clients:
                 available = [k for k in ("acc1", "acc2", "acc3") if k in clients and worker_rate_limited_until.get(k, 0) <= now]
                 if available:
                     chosen_key = random.choice(available)
                 else:
-                    wait_sec = min(30, max(2, int(worker_rate_limited_until.get(chosen_key, now) - now)))
-                    logging.warning(f"All worker accounts rate-limited. Pausing {wait_sec}s...")
-                    await asyncio.sleep(wait_sec)
-                    continue
+                    chosen_key = "acc1"
 
-            active_account = clients.get(chosen_key) or clients.get("acc1")
-            
-            if active_account and active_account.get("client") and active_account["client"].is_connected():
-                client = active_account["client"]
-                try:
-                    target = TARGET_CHAT_ID or TARGET_CHAT
-                    entity = await asyncio.wait_for(client.get_entity(target), timeout=8.0)
-                    
-                    reply_msg_id = None
-                    if reply_to_csv and reply_to_csv in message_tracker:
-                        reply_msg_id = message_tracker[reply_to_csv]
-                        
-                    sent_msg = None
-                    voice_step_counter += 1
-                    
-                    # 1. Voice Note Generation (every ~10 messages)
-                    if voice_step_counter >= VOICE_FREQUENCY and chosen_key in ("acc1", "acc2", "acc3", "acc4"):
-                        try:
-                            vn_path, transcript = await voice_engine.generate_voice_note(chosen_key, context_text=msg)
-                            if vn_path and os.path.exists(vn_path):
-                                logging.info(f"🎙 [{active_account['name']}] Sending Voice Note: '{transcript}'")
-                                sent_msg = await asyncio.wait_for(
-                                    client.send_file(entity, vn_path, voice_note=True, reply_to=reply_msg_id),
-                                    timeout=15.0
-                                )
-                                voice_step_counter = 0
-                                last_sent_text = transcript or msg
-                        except Exception as ve:
-                            logging.debug(f"Voice generation skipped/fallback to text: {ve}")
+            # 1. Resolve worker and entity with guaranteed fallback to acc1
+            entity = await get_client_entity(chosen_key)
+            sender_client = None
+            sender_name = ""
 
-                    # 2. Regular Text Message Send
-                    if not sent_msg:
-                        if MESSAGE_DELAY > 5.0:
-                            await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
+            if entity and chosen_key in clients and clients[chosen_key]["client"].is_connected():
+                sender_client = clients[chosen_key]["client"]
+                sender_name = clients[chosen_key]["name"]
+            else:
+                # Instant fallback to acc1 (guaranteed to have group access)
+                entity = await get_client_entity("acc1")
+                if entity and "acc1" in clients and clients["acc1"]["client"].is_connected():
+                    sender_client = clients["acc1"]["client"]
+                    sender_name = clients["acc1"]["name"]
+                    chosen_key = "acc1"
+
+            if not sender_client or not entity:
+                logging.warning("No connected worker with resolved group entity. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
+
+            client = sender_client
+            active_account = {"client": sender_client, "name": sender_name}
+
+            try:
+                reply_msg_id = None
+                if reply_to_csv and reply_to_csv in message_tracker:
+                    reply_msg_id = message_tracker[reply_to_csv]
+                    
+                sent_msg = None
+                voice_step_counter += 1
+                
+                # 1. Voice Note Generation (every ~10 messages)
+                if voice_step_counter >= VOICE_FREQUENCY and chosen_key in ("acc1", "acc2", "acc3", "acc4"):
+                    try:
+                        vn_path, transcript = await voice_engine.generate_voice_note(chosen_key, context_text=msg)
+                        if vn_path and os.path.exists(vn_path):
+                            logging.info(f"🎙 [{sender_name}] Sending Voice Note: '{transcript}'")
+                            sent_msg = await asyncio.wait_for(
+                                client.send_file(entity, vn_path, voice_note=True, reply_to=reply_msg_id),
+                                timeout=15.0
+                            )
+                            voice_step_counter = 0
+                            last_sent_text = transcript or msg
+                    except Exception as ve:
+                        logging.debug(f"Voice generation skipped/fallback to text: {ve}")
+
+                # 2. Regular Text Message Send with automatic acc1 fallback
+                if not sent_msg:
+                    if MESSAGE_DELAY > 5.0:
+                        await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
+                    try:
                         sent_msg = await asyncio.wait_for(
                             client.send_message(entity, msg, reply_to=reply_msg_id),
                             timeout=12.0
                         )
-                        last_sent_text = msg
-                    
+                    except Exception as send_err:
+                        logging.warning(f"Send failed on {sender_name} ({send_err}), retrying with acc1...")
+                        if chosen_key != "acc1" and "acc1" in clients and clients["acc1"]["client"].is_connected():
+                            acc1_ent = await get_client_entity("acc1")
+                            if acc1_ent:
+                                sent_msg = await asyncio.wait_for(
+                                    clients["acc1"]["client"].send_message(acc1_ent, msg, reply_to=reply_msg_id),
+                                    timeout=12.0
+                                )
+                    last_sent_text = msg
+                
+                if sent_msg:
                     TOTAL_MESSAGES_SENT += 1
-                    logging.info(f"[{active_account['name']}] Sent: {msg[:45]}...")
+                    logging.info(f"[{sender_name}] Sent: {msg[:45]}...")
                     
-                    if csv_id and sent_msg:
+                    if csv_id:
                         message_tracker[csv_id] = sent_msg.id
                         
                     # Auto-delete message
-                    if AUTO_DELETE_DELAY > 0 and sent_msg:
+                    if AUTO_DELETE_DELAY > 0:
                         asyncio.create_task(delete_message_later(client, entity, sent_msg.id, AUTO_DELETE_DELAY))
                         
                     # Reactions
@@ -463,15 +544,15 @@ async def chat_loop():
                             if AUTO_DELETE_DELAY > 0:
                                 asyncio.create_task(delete_message_later(client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
 
-                except FloodWaitError as e:
-                    logging.warning(f"⚠️ [{active_account['name']}] Rate limit! Pausing worker for {e.seconds}s.")
-                    worker_rate_limited_until[chosen_key] = time.time() + e.seconds
-                    await asyncio.sleep(2.0)
-                    continue
-                except asyncio.TimeoutError:
-                    logging.warning(f"⚠️ Network timeout on {active_account['name']}. Continuing loop safely...")
-                except Exception as e:
-                    logging.error(f"[{active_account['name']}] Error in chat turn: {e}")
+            except FloodWaitError as e:
+                logging.warning(f"⚠️ [{sender_name}] Rate limit! Pausing worker for {e.seconds}s.")
+                worker_rate_limited_until[chosen_key] = time.time() + e.seconds
+                await asyncio.sleep(2.0)
+                continue
+            except asyncio.TimeoutError:
+                logging.warning(f"⚠️ Network timeout on {sender_name}. Continuing loop safely...")
+            except Exception as e:
+                logging.error(f"[{sender_name}] Error in chat turn: {e}")
 
             line_index += 1
             if line_index >= len(conversation_script):
@@ -528,23 +609,31 @@ async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
     if not s_id:
         msg = getattr(event, 'message', None)
         s_id = getattr(getattr(msg, 'from_id', None), 'user_id', None)
-    
+
+    # 1. Fast numeric ID check (0ms, no network latency)
+    if s_id and s_id in SUPER_ADMIN_IDS:
+        return True, ""
+
+    if s_id and (s_id == PRIMARY_OPERATOR_ID or s_id in OPERATOR_USER_IDS):
+        if cmd_name in OPERATOR_ALLOWED_COMMANDS:
+            return True, ""
+        logging.warning(f"[Security] Operator {s_id} denied restricted command: '{cmd_name}'")
+        return False, f"Access Denied: Primary Operator is restricted to ({', '.join(sorted(OPERATOR_ALLOWED_COMMANDS))})."
+
+    # 2. Username check fallback
     username = ""
     try:
-        sender_obj = await event.get_sender()
+        sender_obj = await asyncio.wait_for(event.get_sender(), timeout=3.0)
         username = (getattr(sender_obj, 'username', '') or '').lower().lstrip('@')
     except Exception:
         pass
 
-    # 1. Super Admin Check (Full Privileges)
-    if (s_id in SUPER_ADMIN_IDS) or (username in SUPER_ADMIN_USERNAMES):
+    if username in SUPER_ADMIN_USERNAMES:
         return True, ""
 
-    # 2. Primary Automation Operator (@Itsraventime1 / 6309134652)
-    if (s_id == PRIMARY_OPERATOR_ID) or (username in PRIMARY_OPERATOR_USERNAMES) or (s_id in OPERATOR_USER_IDS):
+    if username in PRIMARY_OPERATOR_USERNAMES:
         if cmd_name in OPERATOR_ALLOWED_COMMANDS:
             return True, ""
-        logging.warning(f"[Security] Operator {s_id} (@{username}) denied restricted command: '{cmd_name}'")
         return False, f"Access Denied: Primary Operator is restricted to ({', '.join(sorted(OPERATOR_ALLOWED_COMMANDS))})."
 
     # 3. Unauthorized users
@@ -598,7 +687,12 @@ def setup_commands(client_instance):
         try:
             await event.reply(text)
         except Exception as re:
-            logging.error(f"Failed to reply to command: {re}")
+            logging.warning(f"event.reply failed: {re}, attempting acc1 fallback...")
+            try:
+                if "acc1" in clients and clients["acc1"]["client"].is_connected():
+                    await clients["acc1"]["client"].send_message(event.chat_id, text, reply_to=event.id)
+            except Exception as fe:
+                logging.error(f"Fallback reply also failed: {fe}")
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(lockon|lockoff)(?:@genzetabot)?$'))
     async def lock_handler(event):
@@ -611,13 +705,12 @@ def setup_commands(client_instance):
                 await reply_safely(event, f"❌ {reason}")
             return
             
-        global chat_task, bot_active
+        global chat_task, bot_active, CHAT_PAUSED
         if cmd == "lockon":
-            if bot_active and chat_task and not chat_task.done():
-                await reply_safely(event, "⚠️ Automation is already running!")
-                return
+            CHAT_PAUSED = False
             bot_active = True
-            chat_task = asyncio.create_task(chat_loop())
+            if chat_task is None or chat_task.done():
+                chat_task = asyncio.create_task(chat_loop())
             await reply_safely(event, 
                 "🚀 **Automation Locked On!**\n\n"
                 f"• Target Group: `{TARGET_CHAT}`\n"
@@ -957,6 +1050,11 @@ async def main():
                             break
             except Exception as be:
                 logging.debug(f"Bot dialogs scan warning: {be}")
+
+            # Pre-warm target group entity across ALL connected accounts (acc1, acc2, acc3, acc4)
+            for acc_key in ("acc1", "acc2", "acc3", "acc4"):
+                if acc_key in clients and clients[acc_key]["client"].is_connected():
+                    await get_client_entity(acc_key)
 
             # Register command listeners on BOTH Bot and Acc1 (strictly scoped to target group)
             setup_commands(host_client)
