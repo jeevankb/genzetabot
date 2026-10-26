@@ -507,17 +507,22 @@ def setup_commands(host_client):
     """
     
     async def should_skip(event):
+        global TARGET_CHAT_ID
         # Enforce target group whitelist
         if event.is_group or event.is_channel:
-            c_title = ""
-            try:
-                chat = await event.get_chat()
-                c_title = (getattr(chat, 'title', '') or '').strip()
-            except Exception:
-                c_title = (getattr(event.chat, 'title', '') or '').strip()
+            if event.chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID):
+                ALLOWED_GROUP_IDS.add(event.chat_id)
+                return False
+
+            c_title = (getattr(event.chat, 'title', '') or '').strip()
+            if not c_title:
+                try:
+                    chat = await asyncio.wait_for(event.get_chat(), timeout=3.0)
+                    c_title = (getattr(chat, 'title', '') or '').strip()
+                except Exception:
+                    pass
                 
             if is_allowed_group(event.chat_id, c_title):
-                global TARGET_CHAT_ID
                 TARGET_CHAT_ID = event.chat_id
                 ALLOWED_GROUP_IDS.add(event.chat_id)
                 return False
@@ -866,6 +871,21 @@ async def main():
         return
 
     host_client = clients["acc4"]["client"]
+
+    # 4b. Also auto-resolve target group from Bot's dialogs
+    try:
+        b_dialogs = await asyncio.wait_for(host_client.get_dialogs(limit=25), timeout=5.0)
+        for d in b_dialogs:
+            if d.is_group or d.is_channel:
+                d_title = (getattr(d, 'title', '') or "").strip().lower()
+                if any(kw in d_title for kw in ["jamghat", "joker"]):
+                    TARGET_CHAT_ID = d.entity.id
+                    ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                    logging.info(f"🎯 [Bot Acc4] Found target group in bot dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                    break
+    except Exception as be:
+        logging.debug(f"Bot dialogs scan warning: {be}")
+
     setup_commands(host_client)
     logging.info("Account 4 (Bot) registered as the exclusive Command Controller.")
     logging.info("User accounts (acc1, acc2, acc3) are running as pure outbound workers (0 difference updates).")
