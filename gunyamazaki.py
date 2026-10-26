@@ -2,13 +2,14 @@ import asyncio
 import os
 import csv
 import random
+import time
 import logging
 import re
 import datetime
 from collections import defaultdict
 from aiohttp import web
 from dotenv import load_dotenv
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import SendReactionRequest
@@ -205,12 +206,15 @@ TOTAL_MESSAGES_SENT = 0
 VOICE_FREQUENCY = 10         # Send a voice note roughly every 10 messages
 voice_step_counter = 0
 
+bot_active = False           # Master switch toggled by /lockon & /lockoff
 chat_task = None
 clients = {}
 conversation_script = []
 conversation_data = []       # alias for compatibility
 active_day_name = "monday"
 CSV_FILE = "conversations_monday.csv"
+worker_rate_limited_until = {}
+processed_cmd_msg_ids = set()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STICKERS_DIR = os.path.join(SCRIPT_DIR, "stickers")
@@ -339,7 +343,7 @@ async def send_dynamic_reply(client, entity, target_msg, text):
     global TOTAL_MESSAGES_SENT
     await simulate_typing(client, entity, text, group_speed=MESSAGE_DELAY)
     try:
-        sent_msg = await client.send_message(entity, text, reply_to=target_msg)
+        sent_msg = await asyncio.wait_for(client.send_message(entity, text, reply_to=target_msg), timeout=12.0)
         TOTAL_MESSAGES_SENT += 1
         if AUTO_DELETE_DELAY > 0:
             asyncio.create_task(delete_message_later(client, entity, sent_msg.id, AUTO_DELETE_DELAY))
@@ -348,17 +352,17 @@ async def send_dynamic_reply(client, entity, target_msg, text):
         logging.error(f"Failed to send dynamic reply: {e}")
 
 # ---------------------------------------------------------------------------
-# CORE CHAT LOOP (OLD-TYPE RELIABILITY + AUTHENTIC VOICE ENGINE)
+# CORE CHAT LOOP (INDESTRUCTIBLE TIMEOUT PROTECTION & AUTO-FAILOVER)
 # ---------------------------------------------------------------------------
 async def chat_loop():
     logging.info("🚀 Chat sequence STARTED via remote command!")
-    global TOTAL_MESSAGES_SENT, voice_step_counter
+    global TOTAL_MESSAGES_SENT, voice_step_counter, bot_active
     line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
     message_tracker = {}
     last_sent_text = ""
     
     try:
-        while True:
+        while bot_active:
             if CHAT_PAUSED:
                 await asyncio.sleep(2)
                 continue
@@ -373,14 +377,27 @@ async def chat_loop():
             reply_to_csv = row.get("reply_to", "")
             reaction_emoji = row.get("reaction", "")
             
-            # Map speaker to client (fallback to acc1 if speaker is missing)
-            active_account = clients.get(speaker_key) or clients.get("acc1")
+            # Select worker: check rate limits and failover if speaker is rate-limited
+            now = time.time()
+            chosen_key = speaker_key
+            if worker_rate_limited_until.get(chosen_key, 0) > now:
+                # Find available backup worker
+                available = [k for k in ("acc1", "acc2", "acc3") if k in clients and worker_rate_limited_until.get(k, 0) <= now]
+                if available:
+                    chosen_key = random.choice(available)
+                else:
+                    wait_sec = min(30, max(2, int(worker_rate_limited_until.get(chosen_key, now) - now)))
+                    logging.warning(f"All worker accounts rate-limited. Pausing {wait_sec}s...")
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+            active_account = clients.get(chosen_key) or clients.get("acc1")
             
-            if active_account and active_account.get("client"):
+            if active_account and active_account.get("client") and active_account["client"].is_connected():
                 client = active_account["client"]
                 try:
                     target = TARGET_CHAT_ID or TARGET_CHAT
-                    entity = await client.get_entity(target)
+                    entity = await asyncio.wait_for(client.get_entity(target), timeout=8.0)
                     
                     reply_msg_id = None
                     if reply_to_csv and reply_to_csv in message_tracker:
@@ -389,13 +406,16 @@ async def chat_loop():
                     sent_msg = None
                     voice_step_counter += 1
                     
-                    # 1. Voice Note Generation (Dedicated voices via VoiceEngine)
-                    if voice_step_counter >= VOICE_FREQUENCY and speaker_key in ("acc1", "acc2", "acc3", "acc4"):
+                    # 1. Voice Note Generation (every ~10 messages)
+                    if voice_step_counter >= VOICE_FREQUENCY and chosen_key in ("acc1", "acc2", "acc3", "acc4"):
                         try:
-                            vn_path, transcript = await voice_engine.generate_voice_note(speaker_key, context_text=msg)
+                            vn_path, transcript = await voice_engine.generate_voice_note(chosen_key, context_text=msg)
                             if vn_path and os.path.exists(vn_path):
                                 logging.info(f"🎙 [{active_account['name']}] Sending Voice Note: '{transcript}'")
-                                sent_msg = await client.send_file(entity, vn_path, voice_note=True, reply_to=reply_msg_id)
+                                sent_msg = await asyncio.wait_for(
+                                    client.send_file(entity, vn_path, voice_note=True, reply_to=reply_msg_id),
+                                    timeout=15.0
+                                )
                                 voice_step_counter = 0
                                 last_sent_text = transcript or msg
                         except Exception as ve:
@@ -405,7 +425,10 @@ async def chat_loop():
                     if not sent_msg:
                         if MESSAGE_DELAY > 5.0:
                             await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
-                        sent_msg = await client.send_message(entity, msg, reply_to=reply_msg_id)
+                        sent_msg = await asyncio.wait_for(
+                            client.send_message(entity, msg, reply_to=reply_msg_id),
+                            timeout=12.0
+                        )
                         last_sent_text = msg
                     
                     TOTAL_MESSAGES_SENT += 1
@@ -436,13 +459,17 @@ async def chat_loop():
                             chosen_sticker = random.choice(available_stickers)
                             sticker_path = os.path.join(STICKERS_DIR, chosen_sticker)
                             await asyncio.sleep(random.uniform(1.0, 2.0))
-                            sent_sticker = await client.send_file(entity, sticker_path)
+                            sent_sticker = await asyncio.wait_for(client.send_file(entity, sticker_path), timeout=12.0)
                             if AUTO_DELETE_DELAY > 0:
                                 asyncio.create_task(delete_message_later(client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
 
                 except FloodWaitError as e:
-                    logging.warning(f"⚠️ Telegram Rate Limit! Pausing chat loop for {e.seconds} seconds.")
-                    await asyncio.sleep(e.seconds + 2)
+                    logging.warning(f"⚠️ [{active_account['name']}] Rate limit! Pausing worker for {e.seconds}s.")
+                    worker_rate_limited_until[chosen_key] = time.time() + e.seconds
+                    await asyncio.sleep(2.0)
+                    continue
+                except asyncio.TimeoutError:
+                    logging.warning(f"⚠️ Network timeout on {active_account['name']}. Continuing loop safely...")
                 except Exception as e:
                     logging.error(f"[{active_account['name']}] Error in chat turn: {e}")
 
@@ -460,6 +487,19 @@ async def chat_loop():
         raise
     except Exception as e:
         logging.error(f"Unexpected chat_loop failure: {e}")
+
+# ---------------------------------------------------------------------------
+# AUTO-RECOVERY WATCHDOG (PREVENTS SILENT FREEZES)
+# ---------------------------------------------------------------------------
+async def chat_loop_watchdog():
+    """Monitors chat_loop and automatically revives it if it crashes while bot_active=True."""
+    global chat_task, bot_active
+    while True:
+        await asyncio.sleep(15)
+        if bot_active:
+            if chat_task is None or chat_task.done():
+                logging.warning("⚠️ [Watchdog] Detected chat_loop stopped unexpectedly! Auto-recovering...")
+                chat_task = asyncio.create_task(chat_loop())
 
 # ---------------------------------------------------------------------------
 # DUMMY WEB SERVER FOR FREE CLOUD HOSTING (RENDER / KOYEB)
@@ -512,19 +552,17 @@ async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
     return False, "Access Denied: You are not authorized to execute bot control commands."
 
 # ---------------------------------------------------------------------------
-# SETUP COMMAND CONTROLLER (ONLY ON ACC4 - THE OFFICIAL BOT)
+# SETUP COMMAND CONTROLLER (ATTACHED TO BOT AND ACC1 WITH STRICT GROUP FILTER)
 # ---------------------------------------------------------------------------
-def setup_commands(host_client):
+def setup_commands(client_instance):
     """
-    STRICT ARCHITECTURE PRINCIPLE:
-    Command listeners are attached EXCLUSIVELY to Account 4 (the Bot token client).
-    User accounts (acc1, acc2, acc3) have ZERO event listeners attached.
-    This guarantees zero background channel difference updates and zero CPU lag.
+    Registers command handlers on client_instance.
+    Handles commands both WITH slash (/lockon) and WITHOUT slash (lockon).
+    Deduplicates commands so only one account replies.
     """
     
     async def should_skip(event):
         global TARGET_CHAT_ID
-        # Enforce target group whitelist
         if event.is_group or event.is_channel:
             if event.chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID):
                 ALLOWED_GROUP_IDS.add(event.chat_id)
@@ -547,7 +585,22 @@ def setup_commands(host_client):
             return True
         return False
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?(lockon|lockoff)(?:@genzetabot)?$'))
+    async def reply_safely(event, text):
+        # Prevent double reply if both bot and user account see the same command
+        msg_id = getattr(event, 'id', None)
+        if msg_id and msg_id in processed_cmd_msg_ids:
+            return
+        if msg_id:
+            processed_cmd_msg_ids.add(msg_id)
+            if len(processed_cmd_msg_ids) > 200:
+                processed_cmd_msg_ids.clear()
+                processed_cmd_msg_ids.add(msg_id)
+        try:
+            await event.reply(text)
+        except Exception as re:
+            logging.error(f"Failed to reply to command: {re}")
+
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(lockon|lockoff)(?:@genzetabot)?$'))
     async def lock_handler(event):
         if await should_skip(event):
             return
@@ -555,16 +608,17 @@ def setup_commands(host_client):
         allowed, reason = await check_command_auth(event, cmd)
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
             
-        global chat_task
+        global chat_task, bot_active
         if cmd == "lockon":
-            if chat_task and not chat_task.done():
-                await event.reply("⚠️ Automation is already running!")
+            if bot_active and chat_task and not chat_task.done():
+                await reply_safely(event, "⚠️ Automation is already running!")
                 return
+            bot_active = True
             chat_task = asyncio.create_task(chat_loop())
-            await event.reply(
+            await reply_safely(event, 
                 "🚀 **Automation Locked On!**\n\n"
                 f"• Target Group: `{TARGET_CHAT}`\n"
                 f"• Current Speed: **{MESSAGE_DELAY}s**\n"
@@ -575,28 +629,27 @@ def setup_commands(host_client):
             logging.info(f"Automation LOCKED ON by sender {event.sender_id}")
             
         elif cmd == "lockoff":
+            bot_active = False
             if chat_task and not chat_task.done():
                 chat_task.cancel()
                 chat_task = None
-                await event.reply("🛑 **Automation Locked Off.** Background chat sequence is stopped.")
-                logging.info(f"Automation LOCKED OFF by sender {event.sender_id}")
-            else:
-                await event.reply("ℹ️ Automation is already off.")
+            await reply_safely(event, "🛑 **Automation Locked Off.** Background chat sequence is stopped.")
+            logging.info(f"Automation LOCKED OFF by sender {event.sender_id}")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?(setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def speed_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "setspeed")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
             
         global MESSAGE_DELAY
         arg = event.pattern_match.group(2)
         if not arg:
-            await event.reply(f"ℹ️ Current speed is locked to **{MESSAGE_DELAY}s** per message.\nUsage: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 1m`")
+            await reply_safely(event, f"ℹ️ Current speed is locked to **{MESSAGE_DELAY}s** per message.\nUsage: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 1m`")
             return
         arg = arg.strip().lower()
         try:
@@ -609,12 +662,12 @@ def setup_commands(host_client):
             else:
                 val = float(arg)
             MESSAGE_DELAY = max(1.0, val)
-            await event.reply(f"⚡ **Speed Locked:** Automation speed updated to **{MESSAGE_DELAY:.1f}s** per message.")
+            await reply_safely(event, f"⚡ **Speed Locked:** Automation speed updated to **{MESSAGE_DELAY:.1f}s** per message.")
             logging.info(f"Speed updated to {MESSAGE_DELAY}s by sender {event.sender_id}")
         except ValueError:
-            await event.reply("❌ Invalid format. Use e.g. `setspeed 5s`, `setspeed 15s`, `setspeed 1m`.")
+            await reply_safely(event, "❌ Invalid format. Use e.g. `setspeed 5s`, `setspeed 15s`, `setspeed 1m`.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?stats(?:@genzetabot)?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?stats(?:@genzetabot)?$'))
     async def stats_handler(event):
         if await should_skip(event):
             return
@@ -622,12 +675,12 @@ def setup_commands(host_client):
         if not allowed:
             return
             
-        is_running = (chat_task is not None and not chat_task.done())
+        is_running = (bot_active and chat_task is not None and not chat_task.done())
         status_str = "🟢 RUNNING" if is_running else "🔴 STOPPED"
         day_cap = active_day_name.capitalize()
         connected_accs = ", ".join([cfg["name"] for k, cfg in accounts.items() if k in clients])
         
-        await event.reply(
+        await reply_safely(event, 
             f"📊 **GenZetaBot Operational Stats**\n\n"
             f"• Automation Status: {status_str}\n"
             f"• Chat Speed: **{MESSAGE_DELAY}s**\n"
@@ -640,20 +693,20 @@ def setup_commands(host_client):
             f"• Target Whitelist: `{TARGET_CHAT}`"
         )
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?setdelete(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setdelete(?:@genzetabot)?(?:\s+(.+))?$'))
     async def delete_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "setdelete")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
             
         global AUTO_DELETE_DELAY
         arg = event.pattern_match.group(1)
         if not arg:
-            await event.reply(f"ℹ️ Current auto-delete delay is **{AUTO_DELETE_DELAY}s**.")
+            await reply_safely(event, f"ℹ️ Current auto-delete delay is **{AUTO_DELETE_DELAY}s**.")
             return
         arg = arg.strip().lower()
         try:
@@ -666,43 +719,43 @@ def setup_commands(host_client):
             else:
                 val = int(arg)
             AUTO_DELETE_DELAY = max(0, val)
-            await event.reply(f"🗑️ Auto-delete delay updated to **{AUTO_DELETE_DELAY}s**.")
+            await reply_safely(event, f"🗑️ Auto-delete delay updated to **{AUTO_DELETE_DELAY}s**.")
         except ValueError:
-            await event.reply("❌ Invalid format. Use e.g. `setdelete 360s` or `setdelete 5m`.")
+            await reply_safely(event, "❌ Invalid format. Use e.g. `setdelete 360s` or `setdelete 5m`.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?setday(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "setday")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
         arg = event.pattern_match.group(1)
         valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         if not arg or arg.strip().lower() not in valid_days:
-            await event.reply(f"❌ Please specify a valid day: {', '.join(valid_days)}\nExample: `setday friday`")
+            await reply_safely(event, f"❌ Please specify a valid day: {', '.join(valid_days)}\nExample: `setday friday`")
             return
         target_day = arg.strip().lower()
         load_csv(target_day)
-        await event.reply(f"📅 **Active Day Switched to {target_day.capitalize()}!**\nLoaded `{CSV_FILE}` with {len(conversation_script)} messages.")
+        await reply_safely(event, f"📅 **Active Day Switched to {target_day.capitalize()}!**\nLoaded `{CSV_FILE}` with {len(conversation_script)} messages.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?day(?:@genzetabot)?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?day(?:@genzetabot)?$'))
     async def day_handler(event):
         if await should_skip(event):
             return
         allowed, _ = await check_command_auth(event, "day")
         if not allowed:
             return
-        await event.reply(
+        await reply_safely(event, 
             f"📅 **Active Daily Dataset Info**\n\n"
             f"• Current Day: **{active_day_name.capitalize()}**\n"
             f"• Active CSV: `{CSV_FILE}`\n"
             f"• Loaded Messages: {len(conversation_script):,} messages"
         )
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?(pause|resume)(?:@genzetabot)?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(pause|resume)(?:@genzetabot)?$'))
     async def pause_handler(event):
         if await should_skip(event):
             return
@@ -710,81 +763,80 @@ def setup_commands(host_client):
         allowed, reason = await check_command_auth(event, cmd)
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
         global CHAT_PAUSED
         if cmd == "pause":
             CHAT_PAUSED = True
-            await event.reply("⏸️ Chat automation is now **PAUSED**.")
+            await reply_safely(event, "⏸️ Chat automation is now **PAUSED**.")
         else:
             CHAT_PAUSED = False
-            await event.reply("▶️ Chat automation is now **RESUMED**.")
+            await reply_safely(event, "▶️ Chat automation is now **RESUMED**.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?resetgroup(?:@genzetabot)?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?resetgroup(?:@genzetabot)?$'))
     async def resetgroup_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "resetgroup")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
         global MESSAGE_DELAY, AUTO_DELETE_DELAY, CHAT_PAUSED
         MESSAGE_DELAY = 10
         AUTO_DELETE_DELAY = 360
         CHAT_PAUSED = False
-        await event.reply("🔄 Settings reset to factory defaults (Speed: 10s, Delete: 360s).")
+        await reply_safely(event, "🔄 Settings reset to factory defaults (Speed: 10s, Delete: 360s).")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicefreq(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicefreq(?:@genzetabot)?(?:\s+(.+))?$'))
     async def voicefreq_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "setvoicefreq")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
         global VOICE_FREQUENCY
         arg = event.pattern_match.group(1)
         if arg and arg.strip().isdigit():
             VOICE_FREQUENCY = max(1, int(arg.strip()))
-            await event.reply(f"🎙 Voice Note Frequency set to every **{VOICE_FREQUENCY}** messages.")
+            await reply_safely(event, f"🎙 Voice Note Frequency set to every **{VOICE_FREQUENCY}** messages.")
         else:
-            await event.reply(f"ℹ️ Current Voice Note Frequency: every **{VOICE_FREQUENCY}** messages.")
+            await reply_safely(event, f"ℹ️ Current Voice Note Frequency: every **{VOICE_FREQUENCY}** messages.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicecooldown(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicecooldown(?:@genzetabot)?(?:\s+(.+))?$'))
     async def voicecooldown_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "setvoicecooldown")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
-        await event.reply("🎙 Voice Cooldown updated.")
+        await reply_safely(event, "🎙 Voice Cooldown updated.")
 
-    @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?topic(?:@genzetabot)?(?:\s+(.+))?$'))
+    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?topic(?:@genzetabot)?(?:\s+(.+))?$'))
     async def topic_handler(event):
         if await should_skip(event):
             return
         allowed, reason = await check_command_auth(event, "topic")
         if not allowed:
             if reason:
-                await event.reply(f"❌ {reason}")
+                await reply_safely(event, f"❌ {reason}")
             return
         global AI_TOPIC
         arg = event.pattern_match.group(1)
         if arg:
             AI_TOPIC = arg.strip()
-            await event.reply(f"💡 AI Topic set to: **{AI_TOPIC}**.")
+            await reply_safely(event, f"💡 AI Topic set to: **{AI_TOPIC}**.")
         else:
             AI_TOPIC = None
-            await event.reply("💡 AI Topic cleared.")
+            await reply_safely(event, "💡 AI Topic cleared.")
 
-    @host_client.on(events.NewMessage())
+    @client_instance.on(events.NewMessage())
     async def auto_delete_group_handler(event):
-        # Ignore stealth command triggers
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "lockon", "lockoff", "/setspeed", "setspeed")):
+        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "lockon", "lockoff", "/setspeed", "setspeed", "speed", "/speed")):
             return
         if await should_skip(event):
             return
@@ -792,7 +844,7 @@ def setup_commands(host_client):
             asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
 
 # ---------------------------------------------------------------------------
-# MAIN APPLICATION ENTRY POINT
+# MAIN APPLICATION ENTRY POINT (PERSISTENT RECONNECT SUPERVISOR)
 # ---------------------------------------------------------------------------
 async def main():
     print("\n" + "="*50)
@@ -805,125 +857,127 @@ async def main():
     # 2. Load Active Daily CSV Dataset
     load_csv()
 
-    # 3. Connect User Accounts and Bot
-    for acc_key, acc_data in accounts.items():
-        session = acc_data.get("session")
-        bot_token = acc_data.get("bot_token")
-        api_id = acc_data["api_id"]
-        api_hash = acc_data["api_hash"]
-
-        if not session and not bot_token:
-            logging.warning(f"Skipping {acc_data['name']} because session/token is missing.")
-            continue
-
+    # 3. Persistent Connection & Self-Healing Loop
+    watchdog_started = False
+    
+    while True:
         try:
-            if bot_token and acc_key == "acc4":
-                client = TelegramClient(StringSession(), api_id, api_hash)
-                await client.start(bot_token=bot_token)
-            else:
-                client = TelegramClient(StringSession(session), api_id, api_hash)
-                await client.connect()
+            # Connect User Accounts and Bot
+            for acc_key, acc_data in accounts.items():
+                session = acc_data.get("session")
+                bot_token = acc_data.get("bot_token")
+                api_id = acc_data["api_id"]
+                api_hash = acc_data["api_hash"]
 
-            if not await client.is_user_authorized():
-                logging.error(f"{acc_data['name']} credentials invalid or unauthorized! Skipping.")
+                if not session and not bot_token:
+                    continue
+
+                if acc_key in clients and clients[acc_key]["client"].is_connected():
+                    continue
+
+                try:
+                    if bot_token and acc_key == "acc4":
+                        client = TelegramClient(StringSession(), api_id, api_hash)
+                        await client.start(bot_token=bot_token)
+                    else:
+                        client = TelegramClient(StringSession(session), api_id, api_hash)
+                        await client.connect()
+
+                    if await client.is_user_authorized():
+                        clients[acc_key] = {"client": client, "name": acc_data["name"]}
+                        logging.info(f"Connected {acc_data['name']} safely.")
+                except Exception as ce:
+                    logging.error(f"Failed to connect {acc_data['name']}: {ce}")
+
+            if "acc4" not in clients or not clients["acc4"]["client"].is_connected():
+                logging.error("Account 4 (Bot) not connected! Retrying in 10s...")
+                await asyncio.sleep(10)
                 continue
 
-            clients[acc_key] = {"client": client, "name": acc_data["name"]}
-            logging.info(f"Connected {acc_data['name']} safely.")
-        except Exception as e:
-            logging.error(f"Failed to connect {acc_data['name']}: {e}")
+            host_client = clients["acc4"]["client"]
 
-    if not clients:
-        logging.error("No valid accounts connected! Exiting.")
-        return
+            # Resolve Target Chat Entity via Account 1 or Bot
+            if "acc1" in clients and clients["acc1"]["client"].is_connected():
+                acc1_client = clients["acc1"]["client"]
+                target_resolved = False
 
-    # 4. Resolve Target Chat Entity via Account 1
-    if "acc1" in clients:
-        acc1_client = clients["acc1"]["client"]
-        target_resolved = False
+                # Method A: Dialogs pre-fetch
+                try:
+                    dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=30), timeout=8.0)
+                    for d in dialogs:
+                        if d.is_group or d.is_channel:
+                            d_title = (getattr(d, 'title', '') or "").strip().lower()
+                            if any(kw in d_title for kw in ["jamghat", "joker"]):
+                                global TARGET_CHAT_ID
+                                TARGET_CHAT_ID = utils.get_peer_id(d.entity)
+                                ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                                ALLOWED_GROUP_IDS.add(d.entity.id)
+                                logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                                target_resolved = True
+                                break
+                except Exception as de:
+                    logging.debug(f"Dialog pre-fetch warning: {de}")
 
-        # Method A: Direct dialogs pre-fetch for "jamghat" / "joker"
-        try:
-            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=30), timeout=8.0)
-            for d in dialogs:
-                if d.is_group or d.is_channel:
-                    d_title = (getattr(d, 'title', '') or "").strip().lower()
-                    if any(kw in d_title for kw in ["jamghat", "joker"]):
-                        global TARGET_CHAT_ID
-                        from telethon import utils
-                        TARGET_CHAT_ID = utils.get_peer_id(d.entity)
+                # Method B: Check invite hash 'noVnALjR8Uw1OWU1'
+                if not target_resolved:
+                    try:
+                        from telethon.tl.functions.messages import CheckChatInviteRequest
+                        c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("noVnALjR8Uw1OWU1")), timeout=8.0)
+                        if hasattr(c_res, 'chat'):
+                            TARGET_CHAT_ID = utils.get_peer_id(c_res.chat)
+                            ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                            ALLOWED_GROUP_IDS.add(c_res.chat.id)
+                            logging.info(f"🎯 [Target Chat] Resolved from invite link: '{getattr(c_res.chat, 'title', '')}' (ID: {TARGET_CHAT_ID})")
+                            target_resolved = True
+                    except Exception as ce:
+                        logging.debug(f"Invite check fallback warning: {ce}")
+
+                # Method C: Direct get_entity fallback
+                if not target_resolved:
+                    try:
+                        entity = await acc1_client.get_entity(TARGET_CHAT)
+                        TARGET_CHAT_ID = utils.get_peer_id(entity)
                         ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-                        ALLOWED_GROUP_IDS.add(d.entity.id)
-                        logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                        target_resolved = True
-                        break
-        except Exception as de:
-            logging.debug(f"Dialog pre-fetch warning: {de}")
+                        ALLOWED_GROUP_IDS.add(entity.id)
+                        logging.info(f"Target chat resolved via get_entity to ID: {TARGET_CHAT_ID}")
+                    except Exception as e:
+                        logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
 
-        # Method B: Check invite hash 'noVnALjR8Uw1OWU1'
-        if not target_resolved:
+            # Also resolve via Bot dialogs
             try:
-                from telethon.tl.functions.messages import CheckChatInviteRequest
-                from telethon import utils
-                c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("noVnALjR8Uw1OWU1")), timeout=8.0)
-                if hasattr(c_res, 'chat'):
-                    TARGET_CHAT_ID = utils.get_peer_id(c_res.chat)
-                    ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-                    ALLOWED_GROUP_IDS.add(c_res.chat.id)
-                    logging.info(f"🎯 [Target Chat] Resolved from invite link: '{getattr(c_res.chat, 'title', '')}' (ID: {TARGET_CHAT_ID})")
-                    target_resolved = True
-            except Exception as ce:
-                logging.debug(f"Invite check fallback warning: {ce}")
+                b_dialogs = await asyncio.wait_for(host_client.get_dialogs(limit=25), timeout=5.0)
+                for d in b_dialogs:
+                    if d.is_group or d.is_channel:
+                        d_title = (getattr(d, 'title', '') or "").strip().lower()
+                        if any(kw in d_title for kw in ["jamghat", "joker"]):
+                            TARGET_CHAT_ID = utils.get_peer_id(d.entity)
+                            ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                            ALLOWED_GROUP_IDS.add(d.entity.id)
+                            logging.info(f"🎯 [Bot Acc4] Found target group in bot dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                            break
+            except Exception as be:
+                logging.debug(f"Bot dialogs scan warning: {be}")
 
-        # Method C: Direct get_entity fallback
-        if not target_resolved:
-            try:
-                from telethon import utils
-                entity = await acc1_client.get_entity(TARGET_CHAT)
-                TARGET_CHAT_ID = utils.get_peer_id(entity)
-                ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-                ALLOWED_GROUP_IDS.add(entity.id)
-                logging.info(f"Target chat resolved via get_entity to ID: {TARGET_CHAT_ID}")
-            except Exception as e:
-                logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
+            # Register command listeners on BOTH Bot and Acc1 (strictly scoped to target group)
+            setup_commands(host_client)
+            if "acc1" in clients and clients["acc1"]["client"].is_connected():
+                setup_commands(clients["acc1"]["client"])
 
-    # 5. Attach Command Listeners SOLELY to Account 4 (Official Bot)
-    if "acc4" not in clients:
-        logging.error("Account 4 (Bot) is NOT connected! The bot cannot listen for commands. Exiting.")
-        return
+            logging.info("Command Controllers active on Bot (@genzetabot) and Account 1.")
+            logging.info(f"Listening for lockon / lockoff commands strictly in {TARGET_CHAT}...")
 
-    host_client = clients["acc4"]["client"]
+            # Start Auto-Recovery Watchdog
+            if not watchdog_started:
+                asyncio.create_task(chat_loop_watchdog())
+                watchdog_started = True
 
-    # 4b. Also auto-resolve target group from Bot's dialogs
-    try:
-        b_dialogs = await asyncio.wait_for(host_client.get_dialogs(limit=25), timeout=5.0)
-        for d in b_dialogs:
-            if d.is_group or d.is_channel:
-                d_title = (getattr(d, 'title', '') or "").strip().lower()
-                if any(kw in d_title for kw in ["jamghat", "joker"]):
-                    TARGET_CHAT_ID = d.entity.id
-                    ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-                    logging.info(f"🎯 [Bot Acc4] Found target group in bot dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                    break
-    except Exception as be:
-        logging.debug(f"Bot dialogs scan warning: {be}")
+            # Keep all connected clients alive simultaneously
+            connected_clients = [c["client"] for c in clients.values() if c.get("client") and c["client"].is_connected()]
+            await asyncio.gather(*[c.run_until_disconnected() for c in connected_clients])
 
-    setup_commands(host_client)
-    logging.info("Account 4 (Bot) registered as the exclusive Command Controller.")
-    logging.info("User accounts (acc1, acc2, acc3) are running as pure outbound workers (0 difference updates).")
-    logging.info(f"Listening for lockon / lockoff commands strictly in {TARGET_CHAT}...")
-
-    try:
-        await host_client.run_until_disconnected()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        print("Disconnecting all clients...")
-        for key, acc in clients.items():
-            try:
-                await acc["client"].disconnect()
-            except Exception:
-                pass
+        except Exception as e:
+            logging.error(f"Telegram connection dropped or interrupted: {e}. Auto-reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try:
