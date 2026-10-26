@@ -708,6 +708,40 @@ async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
     logging.warning(f"[Security] Unauthorized command attempt from user {s_id} (@{username}): '{cmd_name}'")
     return False, "Access Denied: You are not authorized to execute bot control commands."
 
+unauthorized_command_log_cooldown = {}
+
+def check_group_authorized(chat_id: int, event_chat=None) -> bool:
+    """
+    Constant-time O(1) in-memory check without network calls.
+    Validates whether chat_id is in ALLOWED_GROUP_IDS or TARGET_CHAT_ID.
+    """
+    if not chat_id:
+        return False
+    if chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and chat_id == TARGET_CHAT_ID):
+        return True
+
+    # Fast integer / canonical ID matching
+    raw_s = str(abs(chat_id))
+    if raw_s.startswith("100") and len(raw_s) > 3:
+        pure_id = int(raw_s[3:])
+        if pure_id in ALLOWED_GROUP_IDS or -pure_id in ALLOWED_GROUP_IDS:
+            ALLOWED_GROUP_IDS.add(chat_id)
+            return True
+    else:
+        supergroup_id = -int(f"100{raw_s}")
+        if supergroup_id in ALLOWED_GROUP_IDS:
+            ALLOWED_GROUP_IDS.add(chat_id)
+            return True
+
+    # Check title ONLY if already cached on event_chat without any network RPC
+    if event_chat and hasattr(event_chat, 'title') and event_chat.title:
+        t_clean = event_chat.title.strip().lower()
+        if any(kw in t_clean for kw in ["jamghat", "joker"]):
+            ALLOWED_GROUP_IDS.add(chat_id)
+            return True
+
+    return False
+
 # ---------------------------------------------------------------------------
 # SETUP COMMAND CONTROLLER (ATTACHED TO BOT AND ACC1 WITH STRICT GROUP FILTER)
 # ---------------------------------------------------------------------------
@@ -718,27 +752,26 @@ def setup_commands(client_instance):
     Deduplicates commands so only one account replies.
     """
     
-    async def should_skip(event):
+    async def should_skip(event, cmd_name: str = None):
         global TARGET_CHAT_ID
         if event.is_group or event.is_channel:
-            if event.chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID):
-                ALLOWED_GROUP_IDS.add(event.chat_id)
+            if check_group_authorized(event.chat_id, getattr(event, 'chat', None)):
                 return False
 
-            c_title = (getattr(event.chat, 'title', '') or '').strip()
-            if not c_title:
-                try:
-                    chat = await asyncio.wait_for(event.get_chat(), timeout=3.0)
-                    c_title = (getattr(chat, 'title', '') or '').strip()
-                except Exception:
-                    pass
-                
-            if is_allowed_group(event.chat_id, c_title):
-                TARGET_CHAT_ID = event.chat_id
-                ALLOWED_GROUP_IDS.add(event.chat_id)
-                return False
+            # Unauthorized group!
+            # Only log a security warning if an explicit command was attempted,
+            # and rate-limit to at most 1 warning per chat per 60 seconds.
+            if cmd_name:
+                now = time.time()
+                if unauthorized_command_log_cooldown.get(event.chat_id, 0) < now:
+                    unauthorized_command_log_cooldown[event.chat_id] = now + 60.0
+                    if len(unauthorized_command_log_cooldown) > 200:
+                        unauthorized_command_log_cooldown.clear()
+                        unauthorized_command_log_cooldown[event.chat_id] = now + 60.0
+                    c_title = (getattr(getattr(event, 'chat', None), 'title', '') or '').strip()
+                    logging.warning(f"[Security] Command '{cmd_name}' ignored in unauthorized group {event.chat_id} ('{c_title}')")
 
-            logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
+            # Normal ambient chatter in other groups: drop silently with 0 network calls and 0 log spam
             return True
         return False
 
@@ -764,9 +797,9 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(lockon|lockoff)(?:@genzetabot)?$'))
     async def lock_handler(event):
-        if await should_skip(event):
-            return
         cmd = event.pattern_match.group(1).lower()
+        if await should_skip(event, cmd):
+            return
         allowed, reason = await check_command_auth(event, cmd)
         if not allowed:
             if reason:
@@ -799,7 +832,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
     async def speed_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "setspeed"):
             return
         allowed, reason = await check_command_auth(event, "setspeed")
         if not allowed:
@@ -830,7 +863,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?stats(?:@genzetabot)?$'))
     async def stats_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "stats"):
             return
         allowed, _ = await check_command_auth(event, "stats")
         if not allowed:
@@ -856,7 +889,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setdelete(?:@genzetabot)?(?:\s+(.+))?$'))
     async def delete_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "setdelete"):
             return
         allowed, reason = await check_command_auth(event, "setdelete")
         if not allowed:
@@ -886,7 +919,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "setday"):
             return
         allowed, reason = await check_command_auth(event, "setday")
         if not allowed:
@@ -904,7 +937,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?day(?:@genzetabot)?$'))
     async def day_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "day"):
             return
         allowed, _ = await check_command_auth(event, "day")
         if not allowed:
@@ -918,9 +951,9 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(pause|resume)(?:@genzetabot)?$'))
     async def pause_handler(event):
-        if await should_skip(event):
-            return
         cmd = event.pattern_match.group(1).lower()
+        if await should_skip(event, cmd):
+            return
         allowed, reason = await check_command_auth(event, cmd)
         if not allowed:
             if reason:
@@ -936,7 +969,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?resetgroup(?:@genzetabot)?$'))
     async def resetgroup_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "resetgroup"):
             return
         allowed, reason = await check_command_auth(event, "resetgroup")
         if not allowed:
@@ -951,7 +984,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicefreq(?:@genzetabot)?(?:\s+(.+))?$'))
     async def voicefreq_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "setvoicefreq"):
             return
         allowed, reason = await check_command_auth(event, "setvoicefreq")
         if not allowed:
@@ -968,7 +1001,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicecooldown(?:@genzetabot)?(?:\s+(.+))?$'))
     async def voicecooldown_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "setvoicecooldown"):
             return
         allowed, reason = await check_command_auth(event, "setvoicecooldown")
         if not allowed:
@@ -979,7 +1012,7 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?topic(?:@genzetabot)?(?:\s+(.+))?$'))
     async def topic_handler(event):
-        if await should_skip(event):
+        if await should_skip(event, "topic"):
             return
         allowed, reason = await check_command_auth(event, "topic")
         if not allowed:
@@ -1000,6 +1033,8 @@ def setup_commands(client_instance):
         if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "lockon", "lockoff", "/setspeed", "setspeed", "speed", "/speed")):
             return
         if await should_skip(event):
+            return
+        if not bot_active:
             return
 
         s_id = getattr(event, 'sender_id', None)
