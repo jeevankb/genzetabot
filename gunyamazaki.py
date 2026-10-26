@@ -574,16 +574,10 @@ async def load_all_states_from_telegram():
                 st.active_day_name = ctx.active_day_name
                 st.state_msg_id = ctx.state_msg_id
 
-        # 3. Strictly revoke automation permissions for any unauthorized groups
+        # 3. Restore authorization for whitelisted groups
         for cid, st in list(group_states.items()):
-            if not is_allowed_group(cid, st.title):
-                st.is_active = False
-                st.automation_active = False
-                if hasattr(st, 'loop_task') and st.loop_task and not st.loop_task.done():
-                    st.loop_task.cancel()
-
-        if ALLOWED_GROUP_IDS:
-            bot_persistence.deactivate_unauthorized_groups(ALLOWED_GROUP_IDS)
+            if is_allowed_group(cid, st.title):
+                ALLOWED_GROUP_IDS.add(cid)
     except Exception as e:
         logging.error(f"Failed to load group states: {e}")
 
@@ -961,6 +955,8 @@ def setup_commands(bot_client):
                 await send_bot_reply(event, "❌ **Access Denied:** Automation is strictly restricted to the official designated group (https://t.me/+noVnALjR8Uw1OWU1).")
                 return
 
+            ALLOWED_GROUP_IDS.add(chat_id)
+            TARGET_CHAT_ID = chat_id
             workers = await register_and_warmup_group(chat_id, event)
             state.is_active = True
             state.automation_active = True
@@ -1733,6 +1729,9 @@ async def run_group_chat_loop(chat_id: int):
             await asyncio.sleep(2)
             continue
             
+        if not state.active_workers:
+            state.active_workers = [w for w in ["acc1", "acc2", "acc3", "acc4"] if w in clients]
+
         available_workers = [
             w for w in state.active_workers 
             if state.rate_limited_until.get(w, 0) < current_time and w in clients
@@ -1885,7 +1884,6 @@ async def run_group_chat_loop(chat_id: int):
                 asyncio.create_task(save_group_state_to_telegram(chat_id))
 
         except FloodWaitError as fe:
-            state.cached_entities.pop(chosen_key, None)
             state.rate_limited_until[chosen_key] = current_time + fe.seconds
             logging.warning(f"⚠️ [{name}] Rate limited by Telegram in '{state.title}' for {fe.seconds}s. Failing over to another account immediately...")
             await asyncio.sleep(1.0)
@@ -1933,20 +1931,12 @@ async def chat_loop_supervisor():
                     st.active_day_name = now_day
                     asyncio.create_task(save_group_state_to_telegram(cid))
                     
-            # Check all active groups and ensure ONLY whitelisted group runs
+            # Keep active whitelisted groups running continuously with auto-recovery!
             for cid, st in list(group_states.items()):
-                if not is_allowed_group(cid, st.title):
-                    if st.is_active or st.automation_active or st.is_loop_running:
-                        logging.info(f"Revoking automation in unauthorized group '{st.title}' ({cid})")
-                        st.is_active = False
-                        st.automation_active = False
-                        st.is_loop_running = False
-                        if hasattr(st, 'loop_task') and st.loop_task and not st.loop_task.done():
-                            st.loop_task.cancel()
-                    continue
-                if st.is_active and st.automation_active and not st.is_loop_running:
-                    logging.info(f"Supervisor starting loop for active group '{st.title}' ({cid})")
-                    asyncio.create_task(run_group_chat_loop(cid))
+                if is_allowed_group(cid, st.title) or cid in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and cid == TARGET_CHAT_ID):
+                    if st.is_active and st.automation_active and not st.is_loop_running:
+                        logging.info(f"🔄 [Supervisor Auto-Recovery] Restarting stopped chat loop for '{st.title}' ({cid})")
+                        st.loop_task = asyncio.create_task(run_group_chat_loop(cid))
         except Exception as e:
             logging.error(f"Supervisor error: {e}")
         await asyncio.sleep(10)
@@ -2198,14 +2188,12 @@ async def main():
     
     # Restore automated chat loops ONLY for groups that were persisted as active and whitelisted!
     for cid, st in list(group_states.items()):
-        if not is_allowed_group(cid, st.title):
-            st.is_active = False
-            st.automation_active = False
-            continue
-        if st.is_active and st.automation_active and not st.is_loop_running:
-            logging.info(f"Restoring automated chat loop for active group '{st.title}' ({cid})")
-            asyncio.create_task(register_and_warmup_group(cid))
-            st.loop_task = asyncio.create_task(run_group_chat_loop(cid))
+        if is_allowed_group(cid, st.title) or cid in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and cid == TARGET_CHAT_ID):
+            ALLOWED_GROUP_IDS.add(cid)
+            if st.is_active and st.automation_active and not st.is_loop_running:
+                logging.info(f"Restoring automated chat loop for active group '{st.title}' ({cid})")
+                asyncio.create_task(register_and_warmup_group(cid))
+                st.loop_task = asyncio.create_task(run_group_chat_loop(cid))
 
     asyncio.create_task(chat_loop_supervisor())
     
