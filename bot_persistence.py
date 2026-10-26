@@ -451,3 +451,27 @@ def reset_group_state(chat_id: int):
         pass
     logging.info(f"[Persistence] Deliberately reset state for group {chat_id}")
     return ctx
+
+def deactivate_unauthorized_groups(allowed_chat_ids: set):
+    """
+    Deactivates automation for all groups except the explicitly allowed group.
+    Ensures that no other group retains automation permissions in SQLite or memory.
+    """
+    if not allowed_chat_ids:
+        return
+    try:
+        with _get_db_connection() as conn:
+            placeholders = ",".join("?" for _ in allowed_chat_ids)
+            conn.execute(f"""
+                UPDATE group_settings
+                SET automation_active = 0
+                WHERE chat_id NOT IN ({placeholders})
+            """, tuple(allowed_chat_ids))
+        for cid, ctx in list(_group_cache.items()):
+            if cid not in allowed_chat_ids:
+                ctx.automation_active = False
+        save_local_state()
+        logging.info(f"[Persistence] Successfully revoked automation for all groups except allowed IDs: {allowed_chat_ids}")
+    except Exception as e:
+        logging.error(f"[Persistence] Error deactivating unauthorized groups: {e}")
+

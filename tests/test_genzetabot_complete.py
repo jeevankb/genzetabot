@@ -273,5 +273,59 @@ class TestSpeedAndWaifuResilience(unittest.TestCase):
         self.assertFalse(hasattr(gunyamazaki, 'csv_paused_until'), "csv_paused_until global must be removed")
 
 
+class TestTargetGroupWhitelistAndPermissions(unittest.TestCase):
+    """
+    Tests strict single-target group whitelist (https://t.me/+noVnALjR8Uw1OWU1)
+    and preservation of @Itsraventime1 operator permissions.
+    """
+    def setUp(self):
+        import gunyamazaki
+        self.orig_allowed = set(gunyamazaki.ALLOWED_GROUP_IDS)
+        gunyamazaki.ALLOWED_GROUP_IDS.clear()
+
+    def tearDown(self):
+        import gunyamazaki
+        gunyamazaki.ALLOWED_GROUP_IDS = self.orig_allowed
+
+    def test_target_group_allowed_by_id_or_title(self):
+        import gunyamazaki
+        gunyamazaki.ALLOWED_GROUP_IDS.add(-100998877)
+        self.assertTrue(gunyamazaki.is_allowed_group(-100998877, "Any Title"))
+        # Whitelisted by title keyword
+        self.assertTrue(gunyamazaki.is_allowed_group(-100554433, "Joker's_Jamghat_ 👽"))
+        self.assertIn(-100554433, gunyamazaki.ALLOWED_GROUP_IDS)
+        # Any other unauthorized group rejected
+        self.assertFalse(gunyamazaki.is_allowed_group(-100112233, "Random Crypto Group"))
+        self.assertFalse(gunyamazaki.is_allowed_group(-100223344, "Bleach World"))
+
+    def test_itsraventime_maintains_permissions(self):
+        import gunyamazaki
+        self.assertEqual(gunyamazaki.PRIMARY_OPERATOR_ID, 6309134652)
+        self.assertIn("itsraventime1", gunyamazaki.PRIMARY_OPERATOR_USERNAMES)
+        self.assertIn("itsraventime", gunyamazaki.PRIMARY_OPERATOR_USERNAMES)
+        for cmd in ["lockon", "lockoff", "setspeed", "speed", "stats"]:
+            self.assertIn(cmd, gunyamazaki.OPERATOR_ALLOWED_COMMANDS)
+
+    def test_deactivate_unauthorized_groups_persistence(self):
+        bot_persistence.get_or_create_group_context(99111, "Target Group")
+        bot_persistence.get_or_create_group_context(99222, "Other Group 1")
+        bot_persistence.get_or_create_group_context(99333, "Other Group 2")
+
+        # Set all active
+        bot_persistence._group_cache[99111].automation_active = True
+        bot_persistence._group_cache[99222].automation_active = True
+        bot_persistence._group_cache[99333].automation_active = True
+        bot_persistence.save_group_state_to_db(bot_persistence._group_cache[99111])
+        bot_persistence.save_group_state_to_db(bot_persistence._group_cache[99222])
+        bot_persistence.save_group_state_to_db(bot_persistence._group_cache[99333])
+
+        # Deactivate all except target group 99111
+        bot_persistence.deactivate_unauthorized_groups({99111})
+
+        self.assertTrue(bot_persistence._group_cache[99111].automation_active)
+        self.assertFalse(bot_persistence._group_cache[99222].automation_active)
+        self.assertFalse(bot_persistence._group_cache[99333].automation_active)
+
+
 if __name__ == "__main__":
     unittest.main()

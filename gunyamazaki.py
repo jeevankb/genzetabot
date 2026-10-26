@@ -215,17 +215,59 @@ async def generate_gemini_text(prompt: str, recent_replies=None) -> str:
 # Data loading
 active_day_name = datetime.datetime.now().strftime("%A").lower()
 CSV_FILE = f"conversations_{active_day_name}.csv"
-TARGET_CHAT = os.getenv("TARGET_CHAT", "-1003529827660")
-TARGET_CHAT_ID = -1003529827660
 conversation_data = []
+# Whitelisted Target Group Configuration (Strict Single Authorized Group Directive)
+TARGET_CHAT_INVITE_LINK = "https://t.me/+noVnALjR8Uw1OWU1"
+TARGET_CHAT_INVITE_HASH = "noVnALjR8Uw1OWU1"
+
+_env_target = (os.getenv("TARGET_CHAT") or "").strip()
+if _env_target and _env_target != "-1003529827660":
+    TARGET_CHAT = _env_target
+else:
+    TARGET_CHAT = TARGET_CHAT_INVITE_LINK
+
+TARGET_CHAT_ID = None
+ALLOWED_GROUP_IDS = set()
 
 # Arise Auto-Catcher Configuration
-SPAWN_CHAT = os.getenv("SPAWN_CHAT", "-1003529827660")
-SPAWN_CHAT_ID = -1003529827660
-SPAWN_CHAT_TITLE = "Bleach world 👾"
+_env_spawn = (os.getenv("SPAWN_CHAT") or "").strip()
+if _env_spawn and _env_spawn != "-1003529827660":
+    SPAWN_CHAT = _env_spawn
+else:
+    SPAWN_CHAT = TARGET_CHAT_INVITE_LINK
+SPAWN_CHAT_ID = None
+SPAWN_CHAT_TITLE = "Joker's_Jamghat_ 👽"
 arise_autocatch_active = True
 account_rate_limited_until = {}
 processed_spawn_ids = set()
+
+def is_allowed_group(chat_id: int, title: str = "") -> bool:
+    """
+    STRICT SECURITY DIRECTIVE:
+    This bot is strictly whitelisted to operate ONLY in the user's designated group:
+    https://t.me/+noVnALjR8Uw1OWU1 (Joker's Jamghat).
+    All other groups are completely unauthorized, de-permissioned, and blocked.
+    """
+    if not chat_id:
+        return False
+        
+    if chat_id in ALLOWED_GROUP_IDS:
+        return True
+    if TARGET_CHAT_ID and chat_id == TARGET_CHAT_ID:
+        ALLOWED_GROUP_IDS.add(chat_id)
+        return True
+    if SPAWN_CHAT_ID and chat_id == SPAWN_CHAT_ID:
+        ALLOWED_GROUP_IDS.add(chat_id)
+        return True
+        
+    if title:
+        t_clean = title.strip().lower()
+        if any(kw in t_clean for kw in ["jamghat", "joker"]):
+            ALLOWED_GROUP_IDS.add(chat_id)
+            logging.info(f"🛡️ [Group Whitelist] Authorized target group '{title}' (ID: {chat_id})")
+            return True
+            
+    return False
 
 # Account Configuration
 accounts = {
@@ -387,7 +429,7 @@ clients = {}
 SUPER_ADMIN_IDS = {5429173364, 8877720410}  # User 1 & mrfool (Full access)
 PRIMARY_OPERATOR_ID = 6309134652            # Primary Automation Operator (@Itsraventime1)
 OPERATOR_USER_IDS = {PRIMARY_OPERATOR_ID}
-PRIMARY_OPERATOR_USERNAMES = {"itsraventime1"}
+PRIMARY_OPERATOR_USERNAMES = {"itsraventime1", "itsraventime"}
 SUPER_ADMIN_USERNAMES = {"merlin_hermis", "errormonocle", "greatlotm", "great_lotm"}
 AUTHORIZED_USERNAMES = SUPER_ADMIN_USERNAMES | PRIMARY_OPERATOR_USERNAMES
 ALL_ADMIN_IDS = SUPER_ADMIN_IDS | OPERATOR_USER_IDS
@@ -546,6 +588,17 @@ async def load_all_states_from_telegram():
                 st.csv_index = ctx.csv_index
                 st.active_day_name = ctx.active_day_name
                 st.state_msg_id = ctx.state_msg_id
+
+        # 3. Strictly revoke automation permissions for any unauthorized groups
+        for cid, st in list(group_states.items()):
+            if not is_allowed_group(cid, st.title):
+                st.is_active = False
+                st.automation_active = False
+                if hasattr(st, 'loop_task') and st.loop_task and not st.loop_task.done():
+                    st.loop_task.cancel()
+
+        if ALLOWED_GROUP_IDS:
+            bot_persistence.deactivate_unauthorized_groups(ALLOWED_GROUP_IDS)
     except Exception as e:
         logging.error(f"Failed to load group states: {e}")
 
@@ -715,7 +768,7 @@ async def handle_spawn_message(event):
     if not arise_autocatch_active:
         return
         
-    # STRICT FILTER: ONLY collect in the target group (Prisoner world)
+    # STRICT FILTER: ONLY collect in the authorized target group (https://t.me/+noVnALjR8Uw1OWU1)
     chat_title = ""
     try:
         chat = await event.get_chat()
@@ -723,16 +776,7 @@ async def handle_spawn_message(event):
     except Exception:
         pass
 
-    # If this message is from Prisoner world, ALWAYS ACCEPT and lock onto it!
-    if "prisoner" in chat_title.lower():
-        SPAWN_CHAT_ID = event.chat_id
-        SPAWN_CHAT_TITLE = chat_title or "Prisoner world"
-    elif SPAWN_CHAT_ID and event.chat_id == SPAWN_CHAT_ID:
-        pass
-    elif TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID:
-        pass
-    else:
-        # Ignore main group and any unrelated group!
+    if not is_allowed_group(event.chat_id, chat_title):
         return
 
     if event.id in processed_spawn_ids:
@@ -860,6 +904,15 @@ def setup_commands(bot_client):
     def should_skip_cmd(event):
         if not is_acc4 and event.is_private:
             return True
+        # STRICT GROUP RESTRICTION: Block any commands in unauthorized groups
+        if event.is_group or event.is_channel:
+            c_title = ""
+            try:
+                c_title = getattr(event.chat, 'title', '')
+            except: pass
+            if not is_allowed_group(event.chat_id, c_title):
+                logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
+                return True
         msg_id = getattr(event.message, 'id', None)
         if not msg_id:
             return False
@@ -1074,11 +1127,14 @@ def setup_commands(bot_client):
             allowed, _ = await check_command_auth(event, "arisehere")
             if not allowed: return
             SPAWN_CHAT_ID = event.chat_id
-            arise_autocatch_active = True
             try:
                 chat = await event.get_chat()
                 SPAWN_CHAT_TITLE = getattr(chat, 'title', 'Current Group')
             except: pass
+            if not is_allowed_group(event.chat_id, SPAWN_CHAT_TITLE):
+                await send_bot_reply(event, "❌ **Access Denied:** Auto-catcher is strictly restricted to the official designated group (https://t.me/+noVnALjR8Uw1OWU1).")
+                return
+            arise_autocatch_active = True
             await send_bot_reply(event, 
                 f"🎯 **Arise Auto-Catcher LOCKED!**\n\n"
                 f"Group: **{SPAWN_CHAT_TITLE}** (`{SPAWN_CHAT_ID}`)\n"
@@ -1100,6 +1156,10 @@ def setup_commands(bot_client):
                 chat = await event.get_chat()
                 state.title = getattr(chat, 'title', state.title or f"Chat {chat_id}")
             except: pass
+
+            if not is_allowed_group(chat_id, state.title):
+                await send_bot_reply(event, "❌ **Access Denied:** Automation is strictly restricted to the official designated group (https://t.me/+noVnALjR8Uw1OWU1).")
+                return
 
             workers = await register_and_warmup_group(chat_id, event)
             state.is_active = True
@@ -1384,6 +1444,14 @@ def setup_commands(bot_client):
         state = get_group_state(chat_id)
 
         if is_group_msg:
+            c_title = ""
+            try:
+                chat = await event.get_chat()
+                c_title = getattr(chat, 'title', '')
+            except: pass
+            if not is_allowed_group(chat_id, c_title):
+                return
+
             s_id = event.sender_id
             if s_id:
                 state.known_user_ids.add(s_id)
@@ -1845,6 +1913,12 @@ async def run_group_chat_loop(chat_id: int):
     Includes Adult Boy Voice Note engine (3 distinct male voices, natural spacing).
     """
     state = get_group_state(chat_id)
+    if not is_allowed_group(chat_id, state.title):
+        logging.warning(f"🛑 Chat loop blocked for unauthorized group '{state.title}' ({chat_id})")
+        state.is_active = False
+        state.automation_active = False
+        state.is_loop_running = False
+        return
     if state.is_loop_running:
         return
     state.is_loop_running = True
@@ -2050,8 +2124,17 @@ async def chat_loop_supervisor():
                     st.active_day_name = now_day
                     asyncio.create_task(save_group_state_to_telegram(cid))
                     
-            # Check all active groups and ensure their loop is running
+            # Check all active groups and ensure ONLY whitelisted group runs
             for cid, st in list(group_states.items()):
+                if not is_allowed_group(cid, st.title):
+                    if st.is_active or st.automation_active or st.is_loop_running:
+                        logging.info(f"Revoking automation in unauthorized group '{st.title}' ({cid})")
+                        st.is_active = False
+                        st.automation_active = False
+                        st.is_loop_running = False
+                        if hasattr(st, 'loop_task') and st.loop_task and not st.loop_task.done():
+                            st.loop_task.cancel()
+                    continue
                 if st.is_active and st.automation_active and not st.is_loop_running:
                     logging.info(f"Supervisor starting loop for active group '{st.title}' ({cid})")
                     asyncio.create_task(run_group_chat_loop(cid))
@@ -2190,25 +2273,27 @@ async def main():
         if not connected and not any(k == key for k in clients):
             logging.error(f"[{cfg['name']}] Skipped or queued in background. Continuing startup with other accounts.")
             
-    global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE
+    global TARGET_CHAT_ID, TARGET_INPUT_PEER, BOT_ENTITY, SPAWN_CHAT_ID, SPAWN_CHAT_TITLE, ALLOWED_GROUP_IDS
     BOT_ENTITY = None
     TARGET_INPUT_PEER = None
     if "acc1" in clients:
         acc1_client = clients["acc1"]["client"]
         target_resolved = False
         
-        # Step 1: Pre-fetch limited dialogs with a fast timeout so Telethon never hangs
+        # Step 1: Pre-fetch limited dialogs and look for the allowed target group ("jamghat" / "joker")
         dialogs = []
         try:
-            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=25), timeout=8.0)
+            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=30), timeout=8.0)
             for d in dialogs:
                 if d.is_group or d.is_channel:
-                    d_peer_id = utils.get_peer_id(d.entity)
-                    if d.id == -1003529827660 or d_peer_id == -1003529827660 or "3529827660" in str(d.id):
+                    d_title = (getattr(d, 'title', '') or "").strip().lower()
+                    if any(kw in d_title for kw in ["jamghat", "joker"]):
                         entity = d.entity
+                        d_peer_id = utils.get_peer_id(d.entity)
                         TARGET_CHAT_ID = d_peer_id
                         SPAWN_CHAT_ID = d_peer_id
-                        SPAWN_CHAT_TITLE = getattr(d, 'title', '') or SPAWN_CHAT_TITLE
+                        SPAWN_CHAT_TITLE = getattr(d, 'title', '') or "Joker's_Jamghat_ 👽"
+                        ALLOWED_GROUP_IDS.add(d_peer_id)
                         if hasattr(entity, 'access_hash'):
                             from telethon.tl.types import InputPeerChannel
                             TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
@@ -2218,44 +2303,60 @@ async def main():
         except Exception as de:
             logging.debug(f"Dialog pre-fetch non-fatal warning: {de}")
 
-        # Step 2: If not resolved yet, try numeric TARGET_CHAT or non-invite username
+        # Step 2: Try resolving invite link (https://t.me/+noVnALjR8Uw1OWU1)
+        if not target_resolved:
+            invite_hashes = ["noVnALjR8Uw1OWU1"]
+            m_inv = re.search(r'(?:t\.me/(?:\+|joinchat/)|tg://join\?invite=)([a-zA-Z0-9_-]+)', str(TARGET_CHAT))
+            if m_inv and m_inv.group(1) not in invite_hashes:
+                invite_hashes.append(m_inv.group(1))
+
+            for inv_h in invite_hashes:
+                try:
+                    from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+                    from telethon.tl.types import ChatInviteAlready, ChatInvite
+                    c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest(inv_h)), timeout=8.0)
+                    if hasattr(c_res, 'chat'):
+                        entity = c_res.chat
+                        d_peer_id = utils.get_peer_id(entity)
+                        TARGET_CHAT_ID = d_peer_id
+                        SPAWN_CHAT_ID = d_peer_id
+                        SPAWN_CHAT_TITLE = getattr(entity, 'title', '') or "Joker's_Jamghat_ 👽"
+                        ALLOWED_GROUP_IDS.add(d_peer_id)
+                        if hasattr(entity, 'access_hash'):
+                            from telethon.tl.types import InputPeerChannel
+                            TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
+                        logging.info(f"🎯 [Target Chat] Resolved from invite link: '{SPAWN_CHAT_TITLE}' (ID: {TARGET_CHAT_ID})")
+                        target_resolved = True
+                        break
+                    elif hasattr(c_res, 'title'):
+                        try:
+                            imp = await acc1_client(ImportChatInviteRequest(inv_h))
+                            if imp.chats:
+                                entity = imp.chats[0]
+                                d_peer_id = utils.get_peer_id(entity)
+                                TARGET_CHAT_ID = d_peer_id
+                                SPAWN_CHAT_ID = d_peer_id
+                                SPAWN_CHAT_TITLE = getattr(entity, 'title', '') or "Joker's_Jamghat_ 👽"
+                                ALLOWED_GROUP_IDS.add(d_peer_id)
+                                target_resolved = True
+                                break
+                        except Exception:
+                            pass
+                except Exception as ce:
+                    logging.debug(f"Invite check non-fatal: {ce}")
+
+        # Step 3: Numeric TARGET_CHAT fallback (excluding legacy -1003529827660)
         if not target_resolved:
             try:
                 target_str = str(TARGET_CHAT).strip()
-                if target_str.startswith("-100") or target_str.lstrip('-').isdigit():
+                if (target_str.startswith("-100") or target_str.lstrip('-').isdigit()) and target_str != "-1003529827660":
                     entity = await acc1_client.get_entity(int(target_str))
                     TARGET_CHAT_ID = utils.get_peer_id(entity)
-                    if hasattr(entity, 'access_hash'):
-                        from telethon.tl.types import InputPeerChannel
-                        TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
-                    logging.info(f"🎯 Resolved TARGET_CHAT numeric entity: {TARGET_CHAT_ID}")
-                    target_resolved = True
-                elif not any(prefix in target_str for prefix in ["http://", "https://", "t.me/", "+", "joinchat"]):
-                    entity = await acc1_client.get_entity(target_str)
-                    TARGET_CHAT_ID = utils.get_peer_id(entity)
+                    SPAWN_CHAT_ID = TARGET_CHAT_ID
+                    ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
                     target_resolved = True
             except Exception as te:
                 logging.debug(f"Could not resolve TARGET_CHAT string: {te}")
-
-        # Step 3: Title-based search in dialogs fallback
-        if not target_resolved and dialogs:
-            try:
-                for d in dialogs:
-                    if d.is_group or d.is_channel:
-                        title = (getattr(d, 'title', '') or "").lower()
-                        if any(term in title for term in ["bleach", "prisoner", "world", "mafia", "tarot", "anime", "limited", "club"]):
-                            entity = d.entity
-                            TARGET_CHAT_ID = utils.get_peer_id(d.entity)
-                            SPAWN_CHAT_ID = TARGET_CHAT_ID
-                            SPAWN_CHAT_TITLE = d.title or SPAWN_CHAT_TITLE
-                            if hasattr(entity, 'access_hash'):
-                                from telethon.tl.types import InputPeerChannel
-                                TARGET_INPUT_PEER = InputPeerChannel(entity.id, entity.access_hash)
-                            logging.info(f"🎯 Auto-discovered target group from dialogs by title: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                            target_resolved = True
-                            break
-            except Exception as dialog_err:
-                logging.debug(f"Dialog title search fallback error: {dialog_err}")
                 
         if not target_resolved and TARGET_CHAT_ID:
             logging.info(f"Using default fallback TARGET_CHAT_ID: {TARGET_CHAT_ID}")
@@ -2344,15 +2445,8 @@ async def main():
                 except Exception:
                     pass
 
-                # If from Bleach world or Prisoner world, ALWAYS process and lock onto it!
-                if any(term in chat_title.lower() for term in ["bleach", "prisoner"]):
-                    globals()['SPAWN_CHAT_ID'] = event.chat_id
-                    globals()['SPAWN_CHAT_TITLE'] = chat_title or "Bleach world 👾"
-                elif SPAWN_CHAT_ID and event.chat_id == SPAWN_CHAT_ID:
-                    pass
-                elif TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID:
-                    pass
-                else:
+                # STRICT WHITELIST: Only monitor authorized target group
+                if not is_allowed_group(event.chat_id, chat_title):
                     return
 
                 await handle_spawn_message(event)
@@ -2360,9 +2454,12 @@ async def main():
     # Restore per-group isolated states & launch multi-group chat supervisor!
     await load_all_states_from_telegram()
     
-    # Restore automated chat loops ONLY for groups that were persisted as active!
-    # Never force default groups to active on reboot to strictly preserve lockoff and custom settings.
+    # Restore automated chat loops ONLY for groups that were persisted as active and whitelisted!
     for cid, st in list(group_states.items()):
+        if not is_allowed_group(cid, st.title):
+            st.is_active = False
+            st.automation_active = False
+            continue
         if st.is_active and st.automation_active and not st.is_loop_running:
             logging.info(f"Restoring automated chat loop for active group '{st.title}' ({cid})")
             asyncio.create_task(register_and_warmup_group(cid))
