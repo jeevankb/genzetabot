@@ -58,6 +58,11 @@ logging.basicConfig(
 for h in logging.root.handlers:
     h.addFilter(SensitiveDataFilter())
 
+# Silence internal telethon update difference chatter in Render logs
+logging.getLogger("telethon").setLevel(logging.WARNING)
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
+logging.getLogger("telethon.client.updates").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # AI CONFIDENTIALITY DIRECTIVE
 # ---------------------------------------------------------------------------
@@ -106,8 +111,8 @@ if _env_target and not any(bad in _env_target for bad in ("1tWK4j-BYC85MDVl", "-
 else:
     TARGET_CHAT = "https://t.me/+noVnALjR8Uw1OWU1"
 
-TARGET_CHAT_ID = None
-ALLOWED_GROUP_IDS = {-1002361093080}
+TARGET_CHAT_ID = -1003529827660
+ALLOWED_GROUP_IDS = {-1002361093080, -1003529827660, 3529827660}
 
 def is_allowed_group(chat_id: int, title: str = "") -> bool:
     """
@@ -123,6 +128,17 @@ def is_allowed_group(chat_id: int, title: str = "") -> bool:
     if TARGET_CHAT_ID and chat_id == TARGET_CHAT_ID:
         ALLOWED_GROUP_IDS.add(chat_id)
         return True
+    # Match with or without Telegram's -100 prefix
+    raw_s = str(abs(chat_id))
+    if raw_s.startswith("100"):
+        raw_s = raw_s[3:]
+    for allowed in list(ALLOWED_GROUP_IDS):
+        a_s = str(abs(allowed))
+        if a_s.startswith("100"):
+            a_s = a_s[3:]
+        if raw_s == a_s:
+            ALLOWED_GROUP_IDS.add(chat_id)
+            return True
     if title:
         t_clean = title.strip().lower()
         if any(kw in t_clean for kw in ["jamghat", "joker"]):
@@ -834,8 +850,10 @@ async def main():
                     d_title = (getattr(d, 'title', '') or "").strip().lower()
                     if any(kw in d_title for kw in ["jamghat", "joker"]):
                         global TARGET_CHAT_ID
-                        TARGET_CHAT_ID = d.entity.id
+                        from telethon import utils
+                        TARGET_CHAT_ID = utils.get_peer_id(d.entity)
                         ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                        ALLOWED_GROUP_IDS.add(d.entity.id)
                         logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
                         target_resolved = True
                         break
@@ -846,10 +864,12 @@ async def main():
         if not target_resolved:
             try:
                 from telethon.tl.functions.messages import CheckChatInviteRequest
+                from telethon import utils
                 c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("noVnALjR8Uw1OWU1")), timeout=8.0)
                 if hasattr(c_res, 'chat'):
-                    TARGET_CHAT_ID = c_res.chat.id
+                    TARGET_CHAT_ID = utils.get_peer_id(c_res.chat)
                     ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                    ALLOWED_GROUP_IDS.add(c_res.chat.id)
                     logging.info(f"🎯 [Target Chat] Resolved from invite link: '{getattr(c_res.chat, 'title', '')}' (ID: {TARGET_CHAT_ID})")
                     target_resolved = True
             except Exception as ce:
@@ -858,9 +878,11 @@ async def main():
         # Method C: Direct get_entity fallback
         if not target_resolved:
             try:
+                from telethon import utils
                 entity = await acc1_client.get_entity(TARGET_CHAT)
-                TARGET_CHAT_ID = entity.id
+                TARGET_CHAT_ID = utils.get_peer_id(entity)
                 ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                ALLOWED_GROUP_IDS.add(entity.id)
                 logging.info(f"Target chat resolved via get_entity to ID: {TARGET_CHAT_ID}")
             except Exception as e:
                 logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
