@@ -100,7 +100,12 @@ SUPER_ADMIN_ALLOWED_COMMANDS = {
 # STRICT GROUP WHITELIST & TARGETS
 # ---------------------------------------------------------------------------
 ALLOWED_CHAT_INVITE_HASH = "noVnALjR8Uw1OWU1"
-TARGET_CHAT = os.getenv("TARGET_CHAT", "https://t.me/+noVnALjR8Uw1OWU1")
+_env_target = (os.getenv("TARGET_CHAT") or "").strip()
+if _env_target and not any(bad in _env_target for bad in ("1tWK4j-BYC85MDVl", "-1003529827660")):
+    TARGET_CHAT = _env_target
+else:
+    TARGET_CHAT = "https://t.me/+noVnALjR8Uw1OWU1"
+
 TARGET_CHAT_ID = None
 ALLOWED_GROUP_IDS = {-1002361093080}
 
@@ -505,17 +510,20 @@ def setup_commands(host_client):
         # Enforce target group whitelist
         if event.is_group or event.is_channel:
             c_title = ""
-            if event.chat_id in ALLOWED_GROUP_IDS or (TARGET_CHAT_ID and event.chat_id == TARGET_CHAT_ID):
+            try:
+                chat = await event.get_chat()
+                c_title = (getattr(chat, 'title', '') or '').strip()
+            except Exception:
+                c_title = (getattr(event.chat, 'title', '') or '').strip()
+                
+            if is_allowed_group(event.chat_id, c_title):
+                global TARGET_CHAT_ID
+                TARGET_CHAT_ID = event.chat_id
                 ALLOWED_GROUP_IDS.add(event.chat_id)
-            else:
-                try:
-                    chat = await event.get_chat()
-                    c_title = (getattr(chat, 'title', '') or '').strip()
-                except Exception:
-                    c_title = (getattr(event.chat, 'title', '') or '').strip()
-                if not is_allowed_group(event.chat_id, c_title):
-                    logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
-                    return True
+                return False
+
+            logging.warning(f"[Security] Command ignored in unauthorized group {event.chat_id} ('{c_title}')")
+            return True
         return False
 
     @host_client.on(events.NewMessage(pattern=r'(?i)^[/.!]?(lockon|lockoff)(?:@genzetabot)?$'))
@@ -810,14 +818,47 @@ async def main():
 
     # 4. Resolve Target Chat Entity via Account 1
     if "acc1" in clients:
+        acc1_client = clients["acc1"]["client"]
+        target_resolved = False
+
+        # Method A: Direct dialogs pre-fetch for "jamghat" / "joker"
         try:
-            entity = await clients["acc1"]["client"].get_entity(TARGET_CHAT)
-            global TARGET_CHAT_ID
-            TARGET_CHAT_ID = entity.id
-            ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-            logging.info(f"Target chat resolved to ID: {TARGET_CHAT_ID}")
-        except Exception as e:
-            logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
+            dialogs = await asyncio.wait_for(acc1_client.get_dialogs(limit=30), timeout=8.0)
+            for d in dialogs:
+                if d.is_group or d.is_channel:
+                    d_title = (getattr(d, 'title', '') or "").strip().lower()
+                    if any(kw in d_title for kw in ["jamghat", "joker"]):
+                        global TARGET_CHAT_ID
+                        TARGET_CHAT_ID = d.entity.id
+                        ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                        logging.info(f"🎯 [Target Chat] Directly resolved from dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
+                        target_resolved = True
+                        break
+        except Exception as de:
+            logging.debug(f"Dialog pre-fetch warning: {de}")
+
+        # Method B: Check invite hash 'noVnALjR8Uw1OWU1'
+        if not target_resolved:
+            try:
+                from telethon.tl.functions.messages import CheckChatInviteRequest
+                c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("noVnALjR8Uw1OWU1")), timeout=8.0)
+                if hasattr(c_res, 'chat'):
+                    TARGET_CHAT_ID = c_res.chat.id
+                    ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                    logging.info(f"🎯 [Target Chat] Resolved from invite link: '{getattr(c_res.chat, 'title', '')}' (ID: {TARGET_CHAT_ID})")
+                    target_resolved = True
+            except Exception as ce:
+                logging.debug(f"Invite check fallback warning: {ce}")
+
+        # Method C: Direct get_entity fallback
+        if not target_resolved:
+            try:
+                entity = await acc1_client.get_entity(TARGET_CHAT)
+                TARGET_CHAT_ID = entity.id
+                ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
+                logging.info(f"Target chat resolved via get_entity to ID: {TARGET_CHAT_ID}")
+            except Exception as e:
+                logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
 
     # 5. Attach Command Listeners SOLELY to Account 4 (Official Bot)
     if "acc4" not in clients:
