@@ -222,6 +222,7 @@ def format_seconds_to_readable(seconds: int) -> str:
 
 bot_active = False           # Master switch toggled by /lockon & /lockoff
 chat_task = None
+active_chat_tasks = set()
 clients = {}
 conversation_script = []
 conversation_data = []       # alias for compatibility
@@ -485,15 +486,20 @@ async def send_dynamic_reply(client, entity, target_msg, text):
 # CORE CHAT LOOP (CLASSIC CONTINUOUS ENGINE - NEVER STOPS UNTIL LOCKOFF)
 # ---------------------------------------------------------------------------
 async def chat_loop():
+    current_task = asyncio.current_task()
+    if current_task:
+        active_chat_tasks.add(current_task)
     logging.info("🚀 Chat sequence STARTED via remote command!")
-    global TOTAL_MESSAGES_SENT
+    global TOTAL_MESSAGES_SENT, bot_active
     line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
     message_tracker = {}
     
     try:
-        while True:
+        while bot_active:
+            if not bot_active:
+                break
             if CHAT_PAUSED:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 continue
             if not conversation_script:
                 logging.error("The conversation script is empty! Stopping.")
@@ -534,17 +540,23 @@ async def chat_loop():
             sender_client = clients.get(chosen_key, {}).get("client")
             sender_name = clients.get(chosen_key, {}).get("name", chosen_key)
 
+            if not bot_active:
+                break
+
             if sender_client and entity:
                 reply_msg_id = message_tracker.get(reply_to_csv) if reply_to_csv else None
                 sent_msg = None
                 
                 try:
-                    if MESSAGE_DELAY > 5.0:
+                    if MESSAGE_DELAY > 5.0 and bot_active:
                         try:
                             await asyncio.wait_for(simulate_typing(sender_client, entity, msg, group_speed=MESSAGE_DELAY), timeout=4.0)
                         except Exception:
                             pass
                     
+                    if not bot_active:
+                        break
+
                     # Double-try send: first with reply_to, then without reply_to if that fails!
                     try:
                         sent_msg = await asyncio.wait_for(
@@ -552,6 +564,8 @@ async def chat_loop():
                             timeout=10.0
                         )
                     except Exception:
+                        if not bot_active:
+                            break
                         sent_msg = await asyncio.wait_for(
                             sender_client.send_message(entity, msg),
                             timeout=10.0
@@ -568,7 +582,7 @@ async def chat_loop():
                         if AUTO_DELETE_DELAY > 0:
                             asyncio.create_task(delete_message_later(sender_client, entity, sent_msg.id, AUTO_DELETE_DELAY))
 
-                        if reaction_emoji and reply_msg_id:
+                        if reaction_emoji and reply_msg_id and bot_active:
                             try:
                                 await asyncio.wait_for(sender_client(SendReactionRequest(
                                     peer=entity,
@@ -578,22 +592,23 @@ async def chat_loop():
                             except Exception:
                                 pass
 
-                        if random.random() < 0.15 and os.path.exists(STICKERS_DIR):
+                        if random.random() < 0.15 and os.path.exists(STICKERS_DIR) and bot_active:
                             available_stickers = [f for f in os.listdir(STICKERS_DIR) if f.endswith(('.webp', '.png', '.jpg', '.tgs'))]
                             if available_stickers:
                                 chosen_sticker = random.choice(available_stickers)
                                 sticker_path = os.path.join(STICKERS_DIR, chosen_sticker)
                                 await asyncio.sleep(random.uniform(1.0, 2.0))
-                                sent_sticker = await asyncio.wait_for(sender_client.send_file(entity, sticker_path), timeout=10.0)
-                                if AUTO_DELETE_DELAY > 0:
-                                    asyncio.create_task(delete_message_later(sender_client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
+                                if bot_active:
+                                    sent_sticker = await asyncio.wait_for(sender_client.send_file(entity, sticker_path), timeout=10.0)
+                                    if AUTO_DELETE_DELAY > 0:
+                                        asyncio.create_task(delete_message_later(sender_client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
 
                 except FloodWaitError as fe:
                     worker_rate_limited_until[chosen_key] = time.time() + fe.seconds
                     logging.warning(f"[{sender_name}] Rate limited for {fe.seconds}s. Failover to alternate worker...")
                     # Immediate failover to an alternate unblocked account for this turn!
                     backups = [k for k in all_connected if k != chosen_key and worker_rate_limited_until.get(k, 0) <= time.time()]
-                    if backups:
+                    if backups and bot_active:
                         alt_key = random.choice(backups)
                         alt_client = clients.get(alt_key, {}).get("client")
                         alt_entity = await get_client_entity(alt_key)
@@ -619,15 +634,26 @@ async def chat_loop():
                 line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
                 message_tracker.clear()
 
+            if not bot_active:
+                break
+
             delay = max(1.0, float(MESSAGE_DELAY))
             logging.info(f"Waiting {delay:.1f}s before next message...")
-            await asyncio.sleep(delay)
+            # Sleep in short increments to respond to lockoff instantly
+            elapsed = 0.0
+            while elapsed < delay and bot_active and not CHAT_PAUSED:
+                step = min(0.5, delay - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
 
     except asyncio.CancelledError:
         logging.info("🛑 Chat sequence CANCELLED via remote command!")
-        raise
     except Exception as e:
         logging.error(f"Unexpected chat_loop failure: {e}")
+    finally:
+        if current_task:
+            active_chat_tasks.discard(current_task)
+        logging.info("🛑 Chat loop stopped cleanly.")
 
 # ---------------------------------------------------------------------------
 # AUTO-RECOVERY WATCHDOG (PREVENTS SILENT FREEZES)
@@ -636,11 +662,20 @@ async def chat_loop_watchdog():
     """Monitors chat_loop and automatically revives it if it crashes while bot_active=True."""
     global chat_task, bot_active
     while True:
-        await asyncio.sleep(15)
-        if bot_active:
-            if chat_task is None or chat_task.done():
+        await asyncio.sleep(5)
+        if not bot_active:
+            # When bot is inactive, ensure all background chat tasks are dead
+            for t in list(active_chat_tasks):
+                if not t.done():
+                    t.cancel()
+            active_chat_tasks.clear()
+            chat_task = None
+        else:
+            living_tasks = [t for t in active_chat_tasks if not t.done()]
+            if not living_tasks:
                 logging.warning("⚠️ [Watchdog] Detected chat_loop stopped unexpectedly! Auto-recovering...")
                 chat_task = asyncio.create_task(chat_loop())
+                active_chat_tasks.add(chat_task)
 
 # ---------------------------------------------------------------------------
 # DUMMY WEB SERVER FOR FREE CLOUD HOSTING (RENDER / KOYEB)
@@ -841,14 +876,15 @@ def setup_commands(client_instance):
         if cmd == "lockon":
             CHAT_PAUSED = False
             bot_active = True
-            # Cancel any previous task immediately and start a fresh continuous loop!
+            # Cancel any previous tasks immediately
+            for t in list(active_chat_tasks):
+                if not t.done():
+                    t.cancel()
+            active_chat_tasks.clear()
             if chat_task and not chat_task.done():
                 chat_task.cancel()
-                try:
-                    await asyncio.sleep(0.2)
-                except:
-                    pass
             chat_task = asyncio.create_task(chat_loop())
+            active_chat_tasks.add(chat_task)
             readable_del = format_seconds_to_readable(AUTO_DELETE_DELAY)
             await reply_safely(event, 
                 "🚀 **Automation Locked On!**\n\n"
@@ -861,10 +897,14 @@ def setup_commands(client_instance):
             
         elif cmd == "lockoff":
             bot_active = False
+            for t in list(active_chat_tasks):
+                if not t.done():
+                    t.cancel()
+            active_chat_tasks.clear()
             if chat_task and not chat_task.done():
                 chat_task.cancel()
                 chat_task = None
-            await reply_safely(event, "🛑 **Automation Locked Off.** Background chat sequence is stopped.")
+            await reply_safely(event, "🛑 **Automation Locked Off.** Background chat sequence is stopped immediately.")
             logging.info(f"Automation LOCKED OFF by sender {event.sender_id}")
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(setspeed|speed)(?:@genzetabot)?(?:\s+(.+))?$'))
