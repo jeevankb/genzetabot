@@ -282,40 +282,42 @@ async def get_client_entity(client_key: str):
         return None
     cl = acc["client"]
 
-    # 1. Dialogs pre-fetch (best method in Telethon to populate entity and access hash)
-    try:
-        dialogs = await asyncio.wait_for(cl.get_dialogs(limit=50), timeout=8.0)
-        for d in dialogs:
-            if d.is_group or d.is_channel:
-                d_id = getattr(d, 'id', None)
-                ent = getattr(d, 'entity', None)
-                ent_id = getattr(ent, 'id', None)
-                d_title = (getattr(d, 'title', '') or "").strip().lower()
-
-                is_target = (
-                    d_id in ALLOWED_GROUP_IDS or
-                    ent_id in ALLOWED_GROUP_IDS or
-                    (TARGET_CHAT_ID and (d_id == TARGET_CHAT_ID or ent_id == TARGET_CHAT_ID)) or
-                    any(kw in d_title for kw in ["jamghat", "joker"])
-                )
-                if is_target:
-                    target_ent = ent if ent is not None else d
-                    cached_entities[client_key] = target_ent
-                    if d_id:
-                        ALLOWED_GROUP_IDS.add(d_id)
-                    if ent_id:
-                        ALLOWED_GROUP_IDS.add(ent_id)
-                    if not TARGET_CHAT_ID and (d_id or ent_id):
-                        TARGET_CHAT_ID = d_id or ent_id
-                    logging.info(f"🎯 [{acc.get('name', client_key)}] Pre-warmed group entity: '{getattr(d, 'title', '')}'")
-                    return target_ent
-    except Exception as de:
-        logging.debug(f"Dialog fetch notice for {client_key}: {de}")
-
-    # 2. Try direct get_entity with TARGET_CHAT_ID
-    if TARGET_CHAT_ID:
+    # 1. Dialogs pre-fetch (for human user accounts only; bot tokens cannot invoke get_dialogs)
+    if client_key != "acc4" and not acc.get("bot_token"):
         try:
-            ent = await asyncio.wait_for(cl.get_entity(TARGET_CHAT_ID), timeout=5.0)
+            dialogs = await asyncio.wait_for(cl.get_dialogs(limit=50), timeout=8.0)
+            for d in dialogs:
+                if d.is_group or d.is_channel:
+                    d_id = getattr(d, 'id', None)
+                    ent = getattr(d, 'entity', None)
+                    ent_id = getattr(ent, 'id', None)
+                    d_title = (getattr(d, 'title', '') or "").strip().lower()
+
+                    is_target = (
+                        d_id in ALLOWED_GROUP_IDS or
+                        ent_id in ALLOWED_GROUP_IDS or
+                        (TARGET_CHAT_ID and (d_id == TARGET_CHAT_ID or ent_id == TARGET_CHAT_ID)) or
+                        any(kw in d_title for kw in ["jamghat", "joker"])
+                    )
+                    if is_target:
+                        target_ent = ent if ent is not None else d
+                        cached_entities[client_key] = target_ent
+                        if d_id:
+                            ALLOWED_GROUP_IDS.add(d_id)
+                        if ent_id:
+                            ALLOWED_GROUP_IDS.add(ent_id)
+                        if not TARGET_CHAT_ID and (d_id or ent_id):
+                            TARGET_CHAT_ID = d_id or ent_id
+                        logging.info(f"🎯 [{acc.get('name', client_key)}] Pre-warmed group entity: '{getattr(d, 'title', '')}'")
+                        return target_ent
+        except Exception as de:
+            logging.debug(f"Dialog fetch notice for {client_key}: {de}")
+
+    # 2. Try direct get_entity with TARGET_CHAT_ID or TARGET_CHAT
+    target_ref = TARGET_CHAT_ID or TARGET_CHAT
+    if target_ref:
+        try:
+            ent = await asyncio.wait_for(cl.get_entity(target_ref), timeout=5.0)
             if ent:
                 cached_entities[client_key] = ent
                 return ent
@@ -336,7 +338,13 @@ accounts = {
     "acc1": {"name": "Account 1", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": os.getenv("ACC1_SESSION"), "bot_token": None, "user_id": 5429173364},
     "acc2": {"name": "Account 2", "api_id": 8447214, "api_hash": "9ec5782ddd935f7e2763e5e49a590c0d", "session": os.getenv("ACC2_SESSION"), "bot_token": None},
     "acc3": {"name": "Account 3", "api_id": 22792918, "api_hash": "ff10095d2bb96d43d6eb7a7d9fc85f81", "session": os.getenv("ACC3_SESSION"), "bot_token": None},
-    "acc4": {"name": "Account 4 (Bot)", "api_id": 2282111, "api_hash": "da58a1841a16c352a2a999171bbabcad", "session": None, "bot_token": os.getenv("ACC4_BOT_TOKEN")}
+    "acc4": {
+        "name": "Account 4 (Bot)",
+        "api_id": 2282111,
+        "api_hash": "da58a1841a16c352a2a999171bbabcad",
+        "session": None,
+        "bot_token": os.getenv("ACC4_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN"),
+    }
 }
 
 IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -679,7 +687,7 @@ async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
         s_id = getattr(getattr(msg, 'from_id', None), 'user_id', None)
 
     # 1. Fast numeric ID check (0ms, no network latency)
-    if s_id and s_id in SUPER_ADMIN_IDS:
+    if s_id and (s_id in SUPER_ADMIN_IDS or s_id in OUR_USER_IDS):
         return True, ""
 
     if s_id and (s_id == PRIMARY_OPERATOR_ID or s_id in OPERATOR_USER_IDS):
@@ -1161,12 +1169,16 @@ async def main():
                 except Exception as ce:
                     logging.error(f"Failed to connect {acc_data['name']}: {ce}")
 
-            if "acc4" not in clients or not clients["acc4"]["client"].is_connected():
-                logging.error("Account 4 (Bot) not connected! Retrying in 10s...")
+            if "acc4" in clients and clients["acc4"]["client"].is_connected():
+                host_client = clients["acc4"]["client"]
+                logging.info("Account 4 (Bot) online as primary command host.")
+            elif "acc1" in clients and clients["acc1"]["client"].is_connected():
+                host_client = clients["acc1"]["client"]
+                logging.info("Account 1 online as primary command host (Acc4 fallback).")
+            else:
+                logging.error("No active host client (acc1 or acc4) available! Retrying in 10s...")
                 await asyncio.sleep(10)
                 continue
-
-            host_client = clients["acc4"]["client"]
 
             # Resolve Target Chat Entity via Account 1 or Bot
             if "acc1" in clients and clients["acc1"]["client"].is_connected():
@@ -1215,20 +1227,18 @@ async def main():
                     except Exception as e:
                         logging.error(f"Failed to resolve TARGET_CHAT entity: {e}")
 
-            # Also resolve via Bot dialogs
-            try:
-                b_dialogs = await asyncio.wait_for(host_client.get_dialogs(limit=25), timeout=5.0)
-                for d in b_dialogs:
-                    if d.is_group or d.is_channel:
-                        d_title = (getattr(d, 'title', '') or "").strip().lower()
-                        if any(kw in d_title for kw in ["jamghat", "joker"]):
-                            TARGET_CHAT_ID = utils.get_peer_id(d.entity)
-                            ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
-                            ALLOWED_GROUP_IDS.add(d.entity.id)
-                            logging.info(f"🎯 [Bot Acc4] Found target group in bot dialogs: '{d.title}' (ID: {TARGET_CHAT_ID})")
-                            break
-            except Exception as be:
-                logging.debug(f"Bot dialogs scan warning: {be}")
+            # If acc4 is connected, resolve TARGET_CHAT directly (not via get_dialogs)
+            if "acc4" in clients and clients["acc4"]["client"].is_connected():
+                try:
+                    bot_c = clients["acc4"]["client"]
+                    target_ref = TARGET_CHAT_ID or TARGET_CHAT
+                    if target_ref:
+                        b_ent = await asyncio.wait_for(bot_c.get_entity(target_ref), timeout=5.0)
+                        if b_ent:
+                            cached_entities["acc4"] = b_ent
+                            logging.info(f"🎯 [Bot Acc4] Pre-cached target group entity.")
+                except Exception as be:
+                    logging.debug(f"Bot entity resolve notice: {be}")
 
             # Pre-warm target group entity across ALL connected accounts (acc1, acc2, acc3, acc4)
             for acc_key in ("acc1", "acc2", "acc3", "acc4"):
@@ -1237,7 +1247,7 @@ async def main():
 
             # Register command listeners on BOTH Bot and Acc1 (strictly scoped to target group)
             setup_commands(host_client)
-            if "acc1" in clients and clients["acc1"]["client"].is_connected():
+            if "acc1" in clients and clients["acc1"]["client"].is_connected() and host_client != clients["acc1"]["client"]:
                 setup_commands(clients["acc1"]["client"])
 
             logging.info("Command Controllers active on Bot (@genzetabot) and Account 1.")
