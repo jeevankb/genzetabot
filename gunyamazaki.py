@@ -197,13 +197,28 @@ def get_group_state(chat_id: int, title: str = "") -> GroupState:
 # ---------------------------------------------------------------------------
 # GLOBAL AUTOMATION SETTINGS (OLD-TYPE SIMPLICITY)
 # ---------------------------------------------------------------------------
-AUTO_DELETE_DELAY = 360      # Auto-delete messages after 6 minutes
-MESSAGE_DELAY = 10           # Default speed in seconds
+AUTO_DELETE_DELAY = 777600    # Default auto-delete: 9 days (9 * 86400s)
+MESSAGE_DELAY = 5.0           # Default speed: 5.0 seconds
 CHAT_PAUSED = False
 AI_TOPIC = None
 TOTAL_MESSAGES_SENT = 0
-VOICE_FREQUENCY = 10         # Send a voice note roughly every 10 messages
+VOICE_FREQUENCY = 10         # Legacy compatibility placeholder
 voice_step_counter = 0
+
+def format_seconds_to_readable(seconds: int) -> str:
+    if seconds <= 0:
+        return "Disabled (0s)"
+    if seconds >= 86400:
+        days = seconds // 86400
+        rem = seconds % 86400
+        return f"{days} day{'s' if days != 1 else ''}" + (f" {rem // 3600}h" if rem >= 3600 else "")
+    if seconds >= 3600:
+        hours = seconds // 3600
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    if seconds >= 60:
+        minutes = seconds // 60
+        return f"{minutes} min{'s' if minutes != 1 else ''}"
+    return f"{seconds}s"
 
 bot_active = False           # Master switch toggled by /lockon & /lockoff
 chat_task = None
@@ -467,18 +482,16 @@ async def send_dynamic_reply(client, entity, target_msg, text):
         logging.error(f"Failed to send dynamic reply: {e}")
 
 # ---------------------------------------------------------------------------
-# CORE CHAT LOOP (INDESTRUCTIBLE TIMEOUT PROTECTION & AUTO-FAILOVER)
+# CORE CHAT LOOP (CLASSIC CONTINUOUS ENGINE - NEVER STOPS UNTIL LOCKOFF)
 # ---------------------------------------------------------------------------
 async def chat_loop():
     logging.info("🚀 Chat sequence STARTED via remote command!")
-    global TOTAL_MESSAGES_SENT, voice_step_counter, bot_active
+    global TOTAL_MESSAGES_SENT
     line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
     message_tracker = {}
-    thread_speaker_map = {}
-    last_sent_text = ""
     
     try:
-        while bot_active:
+        while True:
             if CHAT_PAUSED:
                 await asyncio.sleep(2)
                 continue
@@ -488,139 +501,94 @@ async def chat_loop():
                 
             row = conversation_script[line_index]
             csv_speaker = row.get("sender", "acc1")
-            msg = row["message"]
+            msg = row.get("message", "...")
             csv_id = row.get("id", "")
             reply_to_csv = row.get("reply_to", "")
             reaction_emoji = row.get("reaction", "")
-            conv_id = row.get("conversation_id", f"conv_{line_index // 8}")
             
-            # 1. Determine all connected workers across ALL 4 ACCOUNTS (acc1, acc2, acc3, acc4)
+            # 1. Determine available workers across all 4 accounts
             available_workers = [k for k in ("acc1", "acc2", "acc3", "acc4") if k in clients and clients[k]["client"].is_connected()]
             if not available_workers:
                 available_workers = ["acc1"]
 
-            # 2. Map CSV thread roles dynamically across ALL 4 accounts so Bot actively participates
-            if conv_id not in thread_speaker_map:
-                shuffled = random.sample(available_workers, len(available_workers))
-                thread_speaker_map[conv_id] = {
-                    "acc1": shuffled[0 % len(shuffled)],
-                    "acc2": shuffled[1 % len(shuffled)],
-                    "acc3": shuffled[2 % len(shuffled)]
-                }
+            chosen_key = csv_speaker if csv_speaker in available_workers else random.choice(available_workers)
 
-            chosen_key = thread_speaker_map[conv_id].get(csv_speaker, csv_speaker)
-
-            # 3. Failover if chosen speaker is currently rate-limited
-            now = time.time()
-            if worker_rate_limited_until.get(chosen_key, 0) > now or chosen_key not in clients:
-                backups = [k for k in available_workers if worker_rate_limited_until.get(k, 0) <= now]
-                if backups:
-                    chosen_key = random.choice(backups)
-                else:
-                    chosen_key = "acc1"
-
-            # 4. Resolve worker and entity with guaranteed fallback to acc1
+            # 2. Resolve client and entity with instant fallback to acc1
             entity = await get_client_entity(chosen_key)
-            sender_client = None
-            sender_name = ""
-
-            if entity and chosen_key in clients and clients[chosen_key]["client"].is_connected():
-                sender_client = clients[chosen_key]["client"]
-                sender_name = clients[chosen_key]["name"]
-            else:
-                # Instant fallback to acc1 (guaranteed to have group access)
+            if not entity or chosen_key not in clients or not clients[chosen_key]["client"].is_connected():
+                chosen_key = "acc1"
                 entity = await get_client_entity("acc1")
-                if entity and "acc1" in clients and clients["acc1"]["client"].is_connected():
-                    sender_client = clients["acc1"]["client"]
-                    sender_name = clients["acc1"]["name"]
-                    chosen_key = "acc1"
 
-            if not sender_client or not entity:
-                logging.warning("No connected worker with resolved group entity. Retrying in 5s...")
-                await asyncio.sleep(5)
-                continue
+            sender_client = clients.get(chosen_key, {}).get("client")
+            sender_name = clients.get(chosen_key, {}).get("name", chosen_key)
 
-            client = sender_client
-            active_account = {"client": sender_client, "name": sender_name}
-
-            try:
-                reply_msg_id = None
-                if reply_to_csv and reply_to_csv in message_tracker:
-                    reply_msg_id = message_tracker[reply_to_csv]
-                    
+            if sender_client and entity:
+                reply_msg_id = message_tracker.get(reply_to_csv) if reply_to_csv else None
                 sent_msg = None
-
-                # Normal Text Message Send with automatic acc1 fallback
-                if MESSAGE_DELAY > 5.0:
-                    await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
-                try:
-                    sent_msg = await asyncio.wait_for(
-                        client.send_message(entity, msg, reply_to=reply_msg_id),
-                        timeout=12.0
-                    )
-                except Exception as send_err:
-                    logging.warning(f"Send failed on {sender_name} ({send_err}), retrying with acc1...")
-                    if chosen_key != "acc1" and "acc1" in clients and clients["acc1"]["client"].is_connected():
-                        acc1_ent = await get_client_entity("acc1")
-                        if acc1_ent:
-                            sent_msg = await asyncio.wait_for(
-                                clients["acc1"]["client"].send_message(acc1_ent, msg, reply_to=reply_msg_id),
-                                timeout=12.0
-                            )
-                last_sent_text = msg
                 
-                if sent_msg:
-                    TOTAL_MESSAGES_SENT += 1
-                    logging.info(f"[{sender_name}] Sent: {msg[:45]}...")
+                try:
+                    if MESSAGE_DELAY > 5.0:
+                        await simulate_typing(sender_client, entity, msg, group_speed=MESSAGE_DELAY)
                     
-                    if csv_id:
-                        message_tracker[csv_id] = sent_msg.id
+                    # Double-try send: first with reply_to, then without reply_to if that fails!
+                    try:
+                        sent_msg = await asyncio.wait_for(
+                            sender_client.send_message(entity, msg, reply_to=reply_msg_id),
+                            timeout=10.0
+                        )
+                    except Exception:
+                        sent_msg = await asyncio.wait_for(
+                            sender_client.send_message(entity, msg),
+                            timeout=10.0
+                        )
                         
-                    # Auto-delete message
-                    if AUTO_DELETE_DELAY > 0:
-                        asyncio.create_task(delete_message_later(client, entity, sent_msg.id, AUTO_DELETE_DELAY))
-                        
-                    # Reactions
-                    if reaction_emoji and reply_msg_id:
-                        try:
-                            await client(SendReactionRequest(
-                                peer=entity,
-                                msg_id=reply_msg_id,
-                                reaction=[ReactionEmoji(emoticon=reaction_emoji)]
-                            ))
-                        except Exception:
-                            pass
-                            
-                    # Stickers (15% natural chance)
-                    if random.random() < 0.15 and os.path.exists(STICKERS_DIR):
-                        available_stickers = [f for f in os.listdir(STICKERS_DIR) if f.endswith(('.webp', '.png', '.jpg', '.tgs'))]
-                        if available_stickers:
-                            chosen_sticker = random.choice(available_stickers)
-                            sticker_path = os.path.join(STICKERS_DIR, chosen_sticker)
-                            await asyncio.sleep(random.uniform(1.0, 2.0))
-                            sent_sticker = await asyncio.wait_for(client.send_file(entity, sticker_path), timeout=12.0)
-                            if AUTO_DELETE_DELAY > 0:
-                                asyncio.create_task(delete_message_later(client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
+                    if sent_msg:
+                        TOTAL_MESSAGES_SENT += 1
+                        logging.info(f"[{sender_name}] Sent: {msg[:45]}...")
+                        if csv_id:
+                            message_tracker[csv_id] = sent_msg.id
+                            if len(message_tracker) > 500:
+                                message_tracker.pop(next(iter(message_tracker)))
 
-            except FloodWaitError as e:
-                logging.warning(f"⚠️ [{sender_name}] Rate limit! Pausing worker for {e.seconds}s.")
-                worker_rate_limited_until[chosen_key] = time.time() + e.seconds
-                await asyncio.sleep(2.0)
-                continue
-            except asyncio.TimeoutError:
-                logging.warning(f"⚠️ Network timeout on {sender_name}. Continuing loop safely...")
-            except Exception as e:
-                logging.error(f"[{sender_name}] Error in chat turn: {e}")
+                        if AUTO_DELETE_DELAY > 0:
+                            asyncio.create_task(delete_message_later(sender_client, entity, sent_msg.id, AUTO_DELETE_DELAY))
 
+                        if reaction_emoji and reply_msg_id:
+                            try:
+                                await sender_client(SendReactionRequest(
+                                    peer=entity,
+                                    msg_id=reply_msg_id,
+                                    reaction=[ReactionEmoji(emoticon=reaction_emoji)]
+                                ))
+                            except Exception:
+                                pass
+
+                        if random.random() < 0.15 and os.path.exists(STICKERS_DIR):
+                            available_stickers = [f for f in os.listdir(STICKERS_DIR) if f.endswith(('.webp', '.png', '.jpg', '.tgs'))]
+                            if available_stickers:
+                                chosen_sticker = random.choice(available_stickers)
+                                sticker_path = os.path.join(STICKERS_DIR, chosen_sticker)
+                                await asyncio.sleep(random.uniform(1.0, 2.0))
+                                sent_sticker = await asyncio.wait_for(sender_client.send_file(entity, sticker_path), timeout=10.0)
+                                if AUTO_DELETE_DELAY > 0:
+                                    asyncio.create_task(delete_message_later(sender_client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
+
+                except FloodWaitError as fe:
+                    logging.warning(f"[{sender_name}] Rate limited! Pausing {fe.seconds}s...")
+                    await asyncio.sleep(fe.seconds + 2)
+                except Exception as e:
+                    logging.error(f"[{sender_name}] Error in chat turn: {e}")
+
+            # 3. UNCONDITIONAL LINE ADVANCE: NEVER GETS STUCK!
             line_index += 1
             if line_index >= len(conversation_script):
                 line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
                 message_tracker.clear()
-                
-            delay = MESSAGE_DELAY
+
+            delay = max(1.0, float(MESSAGE_DELAY))
             logging.info(f"Waiting {delay:.1f}s before next message...")
             await asyncio.sleep(delay)
-            
+
     except asyncio.CancelledError:
         logging.info("🛑 Chat sequence CANCELLED via remote command!")
         raise
@@ -792,10 +760,12 @@ def setup_commands(client_instance):
         try:
             await event.reply(text)
         except Exception as re:
-            logging.warning(f"event.reply failed: {re}, attempting acc1 fallback...")
+            logging.warning(f"event.reply failed: {re}, attempting direct send fallback...")
             try:
-                if "acc1" in clients and clients["acc1"]["client"].is_connected():
-                    await clients["acc1"]["client"].send_message(event.chat_id, text, reply_to=event.id)
+                cl = clients.get("acc1", {}).get("client") or clients.get("acc4", {}).get("client")
+                if cl and cl.is_connected():
+                    target_peer = getattr(event, 'input_chat', None) or event.chat_id
+                    await cl.send_message(target_peer, text)
             except Exception as fe:
                 logging.error(f"Fallback reply also failed: {fe}")
 
@@ -814,14 +784,21 @@ def setup_commands(client_instance):
         if cmd == "lockon":
             CHAT_PAUSED = False
             bot_active = True
-            if chat_task is None or chat_task.done():
-                chat_task = asyncio.create_task(chat_loop())
+            # Cancel any previous task immediately and start a fresh continuous loop!
+            if chat_task and not chat_task.done():
+                chat_task.cancel()
+                try:
+                    await asyncio.sleep(0.2)
+                except:
+                    pass
+            chat_task = asyncio.create_task(chat_loop())
+            readable_del = format_seconds_to_readable(AUTO_DELETE_DELAY)
             await reply_safely(event, 
                 "🚀 **Automation Locked On!**\n\n"
                 f"• Target Group: `{TARGET_CHAT}`\n"
-                f"• Current Speed: **{MESSAGE_DELAY}s**\n"
-                f"• Active Day: 📅 **{active_day_name.capitalize()}** (`{CSV_FILE}`)\n"
-                f"• Auto-Delete: {AUTO_DELETE_DELAY}s"
+                f"• Speed: **{MESSAGE_DELAY:.1f}s**\n"
+                f"• Auto-Delete: **{readable_del}**\n"
+                f"• Active Day: 📅 **{active_day_name.capitalize()}** (`{CSV_FILE}`)"
             )
             logging.info(f"Automation LOCKED ON by sender {event.sender_id}")
             
@@ -846,7 +823,7 @@ def setup_commands(client_instance):
         global MESSAGE_DELAY
         arg = event.pattern_match.group(2)
         if not arg:
-            await reply_safely(event, f"ℹ️ Current speed is locked to **{MESSAGE_DELAY}s** per message.\nUsage: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 1m`")
+            await reply_safely(event, f"ℹ️ Current speed is locked to **{MESSAGE_DELAY:.1f}s** per message.\nUsage: `/setspeed 5s`, `/setspeed 10s`, `/setspeed 1m`")
             return
         arg = arg.strip().lower()
         try:
@@ -876,12 +853,13 @@ def setup_commands(client_instance):
         status_str = "🟢 RUNNING" if is_running else "🔴 STOPPED"
         day_cap = active_day_name.capitalize()
         connected_accs = ", ".join([cfg["name"] for k, cfg in accounts.items() if k in clients])
+        readable_del = format_seconds_to_readable(AUTO_DELETE_DELAY)
         
         await reply_safely(event, 
             f"📊 **GenZetaBot Operational Stats**\n\n"
             f"• Automation Status: {status_str}\n"
-            f"• Chat Speed: **{MESSAGE_DELAY}s**\n"
-            f"• Auto-Delete Delay: **{AUTO_DELETE_DELAY}s**\n"
+            f"• Chat Speed: **{MESSAGE_DELAY:.1f}s**\n"
+            f"• Auto-Delete Delay: **{readable_del}** ({AUTO_DELETE_DELAY}s)\n"
             f"• Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
             f"• Loaded Messages: {len(conversation_script):,} messages\n"
             f"• Total Messages Sent: {TOTAL_MESSAGES_SENT}\n"
@@ -902,22 +880,29 @@ def setup_commands(client_instance):
         global AUTO_DELETE_DELAY
         arg = event.pattern_match.group(1)
         if not arg:
-            await reply_safely(event, f"ℹ️ Current auto-delete delay is **{AUTO_DELETE_DELAY}s**.")
+            readable_del = format_seconds_to_readable(AUTO_DELETE_DELAY)
+            await reply_safely(event, f"ℹ️ Current auto-delete delay is **{readable_del}** ({AUTO_DELETE_DELAY}s).")
             return
         arg = arg.strip().lower()
         try:
-            if arg.endswith('s'):
-                val = int(arg[:-1])
-            elif arg.endswith('m'):
-                val = int(arg[:-1]) * 60
+            if arg.endswith('days') or arg.endswith('day'):
+                num = arg.replace('days', '').replace('day', '').strip()
+                val = int(num) * 86400
+            elif arg.endswith('d'):
+                val = int(arg[:-1]) * 86400
             elif arg.endswith('h'):
                 val = int(arg[:-1]) * 3600
+            elif arg.endswith('m'):
+                val = int(arg[:-1]) * 60
+            elif arg.endswith('s'):
+                val = int(arg[:-1])
             else:
                 val = int(arg)
             AUTO_DELETE_DELAY = max(0, val)
-            await reply_safely(event, f"🗑️ Auto-delete delay updated to **{AUTO_DELETE_DELAY}s**.")
+            readable = format_seconds_to_readable(AUTO_DELETE_DELAY)
+            await reply_safely(event, f"🗑️ Auto-delete delay updated to **{readable}** ({AUTO_DELETE_DELAY}s).")
         except ValueError:
-            await reply_safely(event, "❌ Invalid format. Use e.g. `setdelete 360s` or `setdelete 5m`.")
+            await reply_safely(event, "❌ Invalid format. Use e.g. `setdelete 9d`, `setdelete 5m`, `setdelete 360s`.")
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setday(?:@genzetabot)?(?:\s+(.+))?$'))
     async def setday_handler(event):
