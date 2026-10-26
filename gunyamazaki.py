@@ -198,7 +198,7 @@ def get_group_state(chat_id: int, title: str = "") -> GroupState:
 # GLOBAL AUTOMATION SETTINGS (OLD-TYPE SIMPLICITY)
 # ---------------------------------------------------------------------------
 AUTO_DELETE_DELAY = 777600    # Default auto-delete: 9 days (9 * 86400s)
-MESSAGE_DELAY = 5.0           # Default speed: 5.0 seconds
+MESSAGE_DELAY = 15.0          # Default speed: 15.0 seconds (classic stability)
 CHAT_PAUSED = False
 AI_TOPIC = None
 TOTAL_MESSAGES_SENT = 0
@@ -393,11 +393,11 @@ def load_csv(day_name=None, shuffle_threads=True):
                 message = row.get("message", "").strip()
                 if sender and message:
                     raw_rows.append({
-                        "id": row.get("id", "").strip(),
+                        "id": (row.get("id") or row.get("\ufeffid") or "").strip(),
                         "sender": sender,
                         "message": message,
-                        "reply_to": row.get("reply_to", "").strip(),
-                        "reaction": row.get("reaction", "").strip(),
+                        "reply_to": (row.get("reply_to") or "").strip(),
+                        "reaction": (row.get("reaction") or "").strip(),
                         "conversation_id": row.get("conversation_id", "default")
                     })
                     
@@ -506,14 +506,26 @@ async def chat_loop():
             reply_to_csv = row.get("reply_to", "")
             reaction_emoji = row.get("reaction", "")
             
-            # 1. Determine available workers across all 4 accounts
-            available_workers = [k for k in ("acc1", "acc2", "acc3", "acc4") if k in clients and clients[k]["client"].is_connected()]
-            if not available_workers:
-                available_workers = ["acc1"]
+            now = time.time()
+            # 1. Determine all connected workers across all 4 accounts
+            all_connected = [k for k in ("acc1", "acc2", "acc3", "acc4") if k in clients and clients[k]["client"].is_connected()]
+            if not all_connected:
+                all_connected = ["acc1"]
 
-            chosen_key = csv_speaker if csv_speaker in available_workers else random.choice(available_workers)
+            # Filter out temporarily rate-limited workers
+            active_workers = [k for k in all_connected if worker_rate_limited_until.get(k, 0) <= now]
+            if not active_workers:
+                # If all workers hit flood limits, rest for at most 15s before re-checking
+                min_wait = min([max(1.0, worker_rate_limited_until.get(k, 0) - now) for k in all_connected])
+                capped_sleep = min(min_wait, 15.0)
+                logging.warning(f"All workers temporarily resting. Pausing for {capped_sleep:.1f}s...")
+                await asyncio.sleep(capped_sleep)
+                active_workers = all_connected
 
-            # 2. Resolve client and entity with instant fallback to acc1
+            # Pick preferred speaker if available, otherwise failover to an unblocked worker!
+            chosen_key = csv_speaker if csv_speaker in active_workers else random.choice(active_workers)
+
+            # 2. Resolve client and entity with guaranteed fallback to acc1
             entity = await get_client_entity(chosen_key)
             if not entity or chosen_key not in clients or not clients[chosen_key]["client"].is_connected():
                 chosen_key = "acc1"
@@ -528,7 +540,10 @@ async def chat_loop():
                 
                 try:
                     if MESSAGE_DELAY > 5.0:
-                        await simulate_typing(sender_client, entity, msg, group_speed=MESSAGE_DELAY)
+                        try:
+                            await asyncio.wait_for(simulate_typing(sender_client, entity, msg, group_speed=MESSAGE_DELAY), timeout=4.0)
+                        except Exception:
+                            pass
                     
                     # Double-try send: first with reply_to, then without reply_to if that fails!
                     try:
@@ -555,11 +570,11 @@ async def chat_loop():
 
                         if reaction_emoji and reply_msg_id:
                             try:
-                                await sender_client(SendReactionRequest(
+                                await asyncio.wait_for(sender_client(SendReactionRequest(
                                     peer=entity,
                                     msg_id=reply_msg_id,
                                     reaction=[ReactionEmoji(emoticon=reaction_emoji)]
-                                ))
+                                )), timeout=5.0)
                             except Exception:
                                 pass
 
@@ -574,8 +589,27 @@ async def chat_loop():
                                     asyncio.create_task(delete_message_later(sender_client, entity, sent_sticker.id, min(AUTO_DELETE_DELAY, 300)))
 
                 except FloodWaitError as fe:
-                    logging.warning(f"[{sender_name}] Rate limited! Pausing {fe.seconds}s...")
-                    await asyncio.sleep(fe.seconds + 2)
+                    worker_rate_limited_until[chosen_key] = time.time() + fe.seconds
+                    logging.warning(f"[{sender_name}] Rate limited for {fe.seconds}s. Failover to alternate worker...")
+                    # Immediate failover to an alternate unblocked account for this turn!
+                    backups = [k for k in all_connected if k != chosen_key and worker_rate_limited_until.get(k, 0) <= time.time()]
+                    if backups:
+                        alt_key = random.choice(backups)
+                        alt_client = clients.get(alt_key, {}).get("client")
+                        alt_entity = await get_client_entity(alt_key)
+                        alt_name = clients.get(alt_key, {}).get("name", alt_key)
+                        if alt_client and alt_entity:
+                            try:
+                                sent_msg = await asyncio.wait_for(alt_client.send_message(alt_entity, msg), timeout=10.0)
+                                if sent_msg:
+                                    TOTAL_MESSAGES_SENT += 1
+                                    logging.info(f"[{alt_name} FAILOVER] Sent: {msg[:45]}...")
+                                    if csv_id:
+                                        message_tracker[csv_id] = sent_msg.id
+                                    if AUTO_DELETE_DELAY > 0:
+                                        asyncio.create_task(delete_message_later(alt_client, alt_entity, sent_msg.id, AUTO_DELETE_DELAY))
+                            except Exception as alt_err:
+                                logging.debug(f"Alt worker send error: {alt_err}")
                 except Exception as e:
                     logging.error(f"[{sender_name}] Error in chat turn: {e}")
 
@@ -614,6 +648,28 @@ async def chat_loop_watchdog():
 async def health_check(request):
     return web.Response(text="GenZetaBot is running safely 24/7!")
 
+async def keep_alive_pinger():
+    """Periodically pings the Render web server to keep free-tier containers from sleeping."""
+    await asyncio.sleep(60)  # Wait 1 min after startup
+    port = int(os.environ.get("PORT", 8080))
+    urls = [
+        "https://genzetabot-1-puv4.onrender.com",
+        f"http://127.0.0.1:{port}/"
+    ]
+    while True:
+        try:
+            import urllib.request
+            for url in urls:
+                try:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'KeepAlivePinger/1.0'})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(600)  # Ping every 10 minutes
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', health_check)
@@ -623,6 +679,7 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logging.info(f"🌐 Cloud Health Check web server active on port {port}.")
+    asyncio.create_task(keep_alive_pinger())
 
 dummy_server = start_web_server
 
@@ -1092,6 +1149,7 @@ async def main():
 
     # 3. Persistent Connection & Self-Healing Loop
     watchdog_started = False
+    configured_clients = set()
     
     while True:
         try:
@@ -1204,10 +1262,13 @@ async def main():
                 if acc_key in clients and clients[acc_key]["client"].is_connected():
                     await get_client_entity(acc_key)
 
-            # Register command listeners on BOTH Bot and Acc1 (strictly scoped to target group)
-            setup_commands(host_client)
-            if "acc1" in clients and clients["acc1"]["client"].is_connected() and host_client != clients["acc1"]["client"]:
+            # Register command listeners on BOTH Bot and Acc1 once (strictly scoped to target group)
+            if host_client not in configured_clients:
+                setup_commands(host_client)
+                configured_clients.add(host_client)
+            if "acc1" in clients and clients["acc1"]["client"].is_connected() and clients["acc1"]["client"] not in configured_clients:
                 setup_commands(clients["acc1"]["client"])
+                configured_clients.add(clients["acc1"]["client"])
 
             logging.info("Command Controllers active on Bot (@genzetabot) and Account 1.")
             logging.info(f"Listening for lockon / lockoff commands strictly in {TARGET_CHAT}...")
@@ -1219,7 +1280,7 @@ async def main():
 
             # Keep all connected clients alive simultaneously
             connected_clients = [c["client"] for c in clients.values() if c.get("client") and c["client"].is_connected()]
-            await asyncio.gather(*[c.run_until_disconnected() for c in connected_clients])
+            await asyncio.gather(*[c.run_until_disconnected() for c in connected_clients], return_exceptions=True)
 
         except Exception as e:
             logging.error(f"Telegram connection dropped or interrupted: {e}. Auto-reconnecting in 5 seconds...")
