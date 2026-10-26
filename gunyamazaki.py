@@ -215,7 +215,58 @@ active_day_name = "monday"
 CSV_FILE = "conversations_monday.csv"
 worker_rate_limited_until = {}
 processed_cmd_msg_ids = set()
+processed_human_msg_ids = set()
 cached_entities = {}
+OUR_USER_IDS = {5429173364, 8877720410}
+
+# Initialize Google GenAI Client
+gemini_client = None
+if os.getenv("GEMINI_API_KEY"):
+    try:
+        from google import genai
+        gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    except Exception as ge:
+        logging.warning(f"Could not initialize google.genai: {ge}")
+
+async def generate_ai_reply_to_human(msg_text: str) -> str:
+    """
+    Uses Gemini to generate a natural, casual, short (1-2 sentences) Hinglish/English reply.
+    """
+    if gemini_client:
+        try:
+            prompt = (
+                f"You are a friendly, casual anime and gaming fan chatting with friends in a Telegram group.\n"
+                f"A member said: '{msg_text}'\n"
+                f"Rules:\n"
+                f"- Reply in 1 very short sentence (maximum 2 short sentences).\n"
+                f"- Use casual, natural Hinglish or Indian English (like 'bhai bilkul', 'sahi baat h', 'arre haan lol').\n"
+                f"- Never say you are an AI or bot. You are just a group member.\n"
+                f"- Don't use too many emojis (0 or 1 natural emoji max).\n"
+            )
+            if AI_TOPIC:
+                prompt += f"- Naturally steer towards: {AI_TOPIC}\n"
+            
+            res = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(model="gemini-3.5-flash-lite", contents=prompt),
+                timeout=8.0
+            )
+            if res and res.text:
+                return res.text.strip()
+        except Exception as ge:
+            logging.debug(f"Gemini reply error: {ge}")
+
+    # Fallback casual replies if API is slow or missing
+    fallbacks = [
+        "sahi baat h bhai bilkul 😂",
+        "arre haan maine bhi suna tha ye",
+        "100% agreed bhai haha",
+        "kya scene h bhai iska?",
+        "hn bhai ye toh check karna padega",
+        "arre bilkul bhai, exactly!",
+        "wait check karke batata hu ruk",
+        "haha true that!"
+    ]
+    return random.choice(fallbacks)
 
 async def get_client_entity(client_key: str):
     """
@@ -416,6 +467,7 @@ async def chat_loop():
     global TOTAL_MESSAGES_SENT, voice_step_counter, bot_active
     line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
     message_tracker = {}
+    thread_speaker_map = {}
     last_sent_text = ""
     
     try:
@@ -428,23 +480,39 @@ async def chat_loop():
                 break
                 
             row = conversation_script[line_index]
-            speaker_key = row["sender"]
+            csv_speaker = row.get("sender", "acc1")
             msg = row["message"]
             csv_id = row.get("id", "")
             reply_to_csv = row.get("reply_to", "")
             reaction_emoji = row.get("reaction", "")
+            conv_id = row.get("conversation_id", f"conv_{line_index // 8}")
             
-            # Select worker: check rate limits and failover if speaker is rate-limited
+            # 1. Determine all connected workers across ALL 4 ACCOUNTS (acc1, acc2, acc3, acc4)
+            available_workers = [k for k in ("acc1", "acc2", "acc3", "acc4") if k in clients and clients[k]["client"].is_connected()]
+            if not available_workers:
+                available_workers = ["acc1"]
+
+            # 2. Map CSV thread roles dynamically across ALL 4 accounts so Bot actively participates
+            if conv_id not in thread_speaker_map:
+                shuffled = random.sample(available_workers, len(available_workers))
+                thread_speaker_map[conv_id] = {
+                    "acc1": shuffled[0 % len(shuffled)],
+                    "acc2": shuffled[1 % len(shuffled)],
+                    "acc3": shuffled[2 % len(shuffled)]
+                }
+
+            chosen_key = thread_speaker_map[conv_id].get(csv_speaker, csv_speaker)
+
+            # 3. Failover if chosen speaker is currently rate-limited
             now = time.time()
-            chosen_key = speaker_key
             if worker_rate_limited_until.get(chosen_key, 0) > now or chosen_key not in clients:
-                available = [k for k in ("acc1", "acc2", "acc3") if k in clients and worker_rate_limited_until.get(k, 0) <= now]
-                if available:
-                    chosen_key = random.choice(available)
+                backups = [k for k in available_workers if worker_rate_limited_until.get(k, 0) <= now]
+                if backups:
+                    chosen_key = random.choice(backups)
                 else:
                     chosen_key = "acc1"
 
-            # 1. Resolve worker and entity with guaranteed fallback to acc1
+            # 4. Resolve worker and entity with guaranteed fallback to acc1
             entity = await get_client_entity(chosen_key)
             sender_client = None
             sender_name = ""
@@ -933,8 +1001,78 @@ def setup_commands(client_instance):
             return
         if await should_skip(event):
             return
+
+        s_id = getattr(event, 'sender_id', None)
+        if not s_id:
+            msg = getattr(event, 'message', None)
+            s_id = getattr(getattr(msg, 'from_id', None), 'user_id', None)
+
+        # Ignore messages sent by our own connected accounts to prevent loops
+        if s_id and s_id in OUR_USER_IDS:
+            return
+
+        msg_id = getattr(event, 'id', None)
+
+        # 1. Schedule auto-deletion for human message
         if AUTO_DELETE_DELAY > 0 and event.message:
             asyncio.create_task(delete_other_message(event.message, AUTO_DELETE_DELAY))
+
+        msg_text = (event.raw_text or "").strip()
+        if not msg_text:
+            return
+
+        # 2. Check deduplication so only one bot account replies
+        if msg_id and msg_id in processed_human_msg_ids:
+            return
+        if msg_id:
+            processed_human_msg_ids.add(msg_id)
+            if len(processed_human_msg_ids) > 200:
+                processed_human_msg_ids.clear()
+                processed_human_msg_ids.add(msg_id)
+
+        # 3. Contextual Emoji Reaction (20% natural chance)
+        if random.random() < 0.20:
+            emoji = "👍"
+            low_t = msg_text.lower()
+            if any(w in low_t for w in ["lol", "lmao", "haha", "xd", "funny"]): emoji = "😂"
+            elif any(w in low_t for w in ["love", "amazing", "best", "great", "cute", "op"]): emoji = "❤️"
+            elif any(w in low_t for w in ["fire", "insane", "crazy", "goat", "lit"]): emoji = "🔥"
+            elif any(w in low_t for w in ["sad", "cry", "rip", "bad", "loss"]): emoji = "😢"
+            try:
+                rx_client = clients.get("acc1", {}).get("client") or clients.get("acc4", {}).get("client")
+                rx_ent = await get_client_entity("acc1") or await get_client_entity("acc4")
+                if rx_client and rx_ent:
+                    await rx_client(SendReactionRequest(
+                        peer=rx_ent,
+                        msg_id=event.message.id,
+                        reaction=[ReactionEmoji(emoticon=emoji)]
+                    ))
+            except Exception:
+                pass
+
+        # 4. Dynamic AI Reply to Humans
+        is_reply_to_us = False
+        if event.message and event.message.is_reply:
+            try:
+                reply_msg = await event.message.get_reply_message()
+                if reply_msg and reply_msg.sender_id in OUR_USER_IDS:
+                    is_reply_to_us = True
+            except Exception:
+                pass
+
+        bot_mentioned = ("@genzetabot" in msg_text.lower() or "genzeta" in msg_text.lower())
+        has_question = ("?" in msg_text)
+        casual_chance = (random.random() < 0.35)
+
+        should_reply = is_reply_to_us or bot_mentioned or has_question or casual_chance
+
+        if should_reply:
+            responder_key = "acc4" if ("acc4" in clients and clients["acc4"]["client"].is_connected()) else "acc1"
+            if responder_key in clients and clients[responder_key]["client"].is_connected():
+                reply_text = await generate_ai_reply_to_human(msg_text)
+                resp_client = clients[responder_key]["client"]
+                resp_entity = await get_client_entity(responder_key) or event.chat_id
+                await send_dynamic_reply(resp_client, resp_entity, event.message, reply_text)
 
 # ---------------------------------------------------------------------------
 # MAIN APPLICATION ENTRY POINT (PERSISTENT RECONNECT SUPERVISOR)
@@ -979,6 +1117,12 @@ async def main():
                     if await client.is_user_authorized():
                         clients[acc_key] = {"client": client, "name": acc_data["name"]}
                         logging.info(f"Connected {acc_data['name']} safely.")
+                        try:
+                            me = await client.get_me()
+                            if me and me.id:
+                                OUR_USER_IDS.add(me.id)
+                        except Exception:
+                            pass
                 except Exception as ce:
                     logging.error(f"Failed to connect {acc_data['name']}: {ce}")
 
