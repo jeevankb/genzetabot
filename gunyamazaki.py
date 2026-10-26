@@ -18,8 +18,7 @@ from telethon.tl.types import ReactionEmoji
 # Load Environment Variables
 load_dotenv()
 
-# Voice Engine & Persistence
-import voice_engine
+# Voice Engine & Persistence (Voice Engine disabled for pure text messaging)
 import bot_persistence
 from bot_persistence import GroupContext, get_or_create_group_context
 
@@ -105,12 +104,12 @@ SUPER_ADMIN_ALLOWED_COMMANDS = {
 # ---------------------------------------------------------------------------
 # STRICT GROUP WHITELIST & TARGETS
 # ---------------------------------------------------------------------------
-ALLOWED_CHAT_INVITE_HASH = "noVnALjR8Uw1OWU1"
+ALLOWED_CHAT_INVITE_HASH = "Elgeiny2Lk81MzRl"
 _env_target = (os.getenv("TARGET_CHAT") or "").strip()
-if _env_target and not any(bad in _env_target for bad in ("1tWK4j-BYC85MDVl", "-1003529827660")):
+if _env_target and not any(bad in _env_target for bad in ("1tWK4j-BYC85MDVl", "-1003529827660", "noVnALjR8Uw1OWU1")):
     TARGET_CHAT = _env_target
 else:
-    TARGET_CHAT = "https://t.me/+noVnALjR8Uw1OWU1"
+    TARGET_CHAT = "https://t.me/+Elgeiny2Lk81MzRl"
 
 TARGET_CHAT_ID = -1003529827660
 ALLOWED_GROUP_IDS = {-1002361093080, -1003529827660, 3529827660}
@@ -119,7 +118,7 @@ def is_allowed_group(chat_id: int, title: str = "") -> bool:
     """
     STRICT SECURITY DIRECTIVE:
     This bot is strictly whitelisted to operate ONLY in the user's designated group:
-    https://t.me/+noVnALjR8Uw1OWU1 (Joker's Jamghat).
+    https://t.me/+Elgeiny2Lk81MzRl (Joker's Jamghat).
     All other groups are completely unauthorized, de-permissioned, and blocked.
     """
     if not chat_id:
@@ -550,42 +549,25 @@ async def chat_loop():
                     reply_msg_id = message_tracker[reply_to_csv]
                     
                 sent_msg = None
-                voice_step_counter += 1
-                
-                # 1. Voice Note Generation (every ~10 messages)
-                if voice_step_counter >= VOICE_FREQUENCY and chosen_key in ("acc1", "acc2", "acc3", "acc4"):
-                    try:
-                        vn_path, transcript = await voice_engine.generate_voice_note(chosen_key, context_text=msg)
-                        if vn_path and os.path.exists(vn_path):
-                            logging.info(f"🎙 [{sender_name}] Sending Voice Note: '{transcript}'")
-                            sent_msg = await asyncio.wait_for(
-                                client.send_file(entity, vn_path, voice_note=True, reply_to=reply_msg_id),
-                                timeout=15.0
-                            )
-                            voice_step_counter = 0
-                            last_sent_text = transcript or msg
-                    except Exception as ve:
-                        logging.debug(f"Voice generation skipped/fallback to text: {ve}")
 
-                # 2. Regular Text Message Send with automatic acc1 fallback
-                if not sent_msg:
-                    if MESSAGE_DELAY > 5.0:
-                        await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
-                    try:
-                        sent_msg = await asyncio.wait_for(
-                            client.send_message(entity, msg, reply_to=reply_msg_id),
-                            timeout=12.0
-                        )
-                    except Exception as send_err:
-                        logging.warning(f"Send failed on {sender_name} ({send_err}), retrying with acc1...")
-                        if chosen_key != "acc1" and "acc1" in clients and clients["acc1"]["client"].is_connected():
-                            acc1_ent = await get_client_entity("acc1")
-                            if acc1_ent:
-                                sent_msg = await asyncio.wait_for(
-                                    clients["acc1"]["client"].send_message(acc1_ent, msg, reply_to=reply_msg_id),
-                                    timeout=12.0
-                                )
-                    last_sent_text = msg
+                # Normal Text Message Send with automatic acc1 fallback
+                if MESSAGE_DELAY > 5.0:
+                    await simulate_typing(client, entity, msg, group_speed=MESSAGE_DELAY)
+                try:
+                    sent_msg = await asyncio.wait_for(
+                        client.send_message(entity, msg, reply_to=reply_msg_id),
+                        timeout=12.0
+                    )
+                except Exception as send_err:
+                    logging.warning(f"Send failed on {sender_name} ({send_err}), retrying with acc1...")
+                    if chosen_key != "acc1" and "acc1" in clients and clients["acc1"]["client"].is_connected():
+                        acc1_ent = await get_client_entity("acc1")
+                        if acc1_ent:
+                            sent_msg = await asyncio.wait_for(
+                                clients["acc1"]["client"].send_message(acc1_ent, msg, reply_to=reply_msg_id),
+                                timeout=12.0
+                            )
+                last_sent_text = msg
                 
                 if sent_msg:
                     TOTAL_MESSAGES_SENT += 1
@@ -681,16 +663,22 @@ dummy_server = start_web_server
 # ---------------------------------------------------------------------------
 async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
     cmd_name = (cmd_name or "").lower().strip()
+
+    # Outgoing commands sent directly by our own connected account
+    if getattr(event, 'out', False):
+        return True, ""
+
     s_id = getattr(event, 'sender_id', None)
     if not s_id:
         msg = getattr(event, 'message', None)
         s_id = getattr(getattr(msg, 'from_id', None), 'user_id', None)
 
     # 1. Fast numeric ID check (0ms, no network latency)
-    if s_id and (s_id in SUPER_ADMIN_IDS or s_id in OUR_USER_IDS):
+    all_known_admins = SUPER_ADMIN_IDS | OUR_USER_IDS | {5429173364, 8877720410}
+    if s_id and s_id in all_known_admins:
         return True, ""
 
-    if s_id and (s_id == PRIMARY_OPERATOR_ID or s_id in OPERATOR_USER_IDS):
+    if s_id and (s_id == PRIMARY_OPERATOR_ID or s_id in OPERATOR_USER_IDS or s_id == 6309134652):
         if cmd_name in OPERATOR_ALLOWED_COMMANDS:
             return True, ""
         logging.warning(f"[Security] Operator {s_id} denied restricted command: '{cmd_name}'")
@@ -707,12 +695,20 @@ async def check_command_auth(event, cmd_name: str) -> tuple[bool, str]:
     if username in SUPER_ADMIN_USERNAMES:
         return True, ""
 
-    if username in PRIMARY_OPERATOR_USERNAMES:
+    if username in PRIMARY_OPERATOR_USERNAMES or username in {"itsraventime1", "itsraventime"}:
         if cmd_name in OPERATOR_ALLOWED_COMMANDS:
             return True, ""
         return False, f"Access Denied: Primary Operator is restricted to ({', '.join(sorted(OPERATOR_ALLOWED_COMMANDS))})."
 
-    # 3. Unauthorized users
+    # 3. Group Admin fallback
+    try:
+        perms = await event.client.get_permissions(event.chat_id, s_id)
+        if perms and perms.is_admin and cmd_name in OPERATOR_ALLOWED_COMMANDS:
+            return True, ""
+    except Exception:
+        pass
+
+    # 4. Unauthorized users
     logging.warning(f"[Security] Unauthorized command attempt from user {s_id} (@{username}): '{cmd_name}'")
     return False, "Access Denied: You are not authorized to execute bot control commands."
 
@@ -825,7 +821,6 @@ def setup_commands(client_instance):
                 f"• Target Group: `{TARGET_CHAT}`\n"
                 f"• Current Speed: **{MESSAGE_DELAY}s**\n"
                 f"• Active Day: 📅 **{active_day_name.capitalize()}** (`{CSV_FILE}`)\n"
-                f"• Voice Notes: 🎙 ONLINE (Merlin Hermis, Mr. Fool, Ruthvik, Will)\n"
                 f"• Auto-Delete: {AUTO_DELETE_DELAY}s"
             )
             logging.info(f"Automation LOCKED ON by sender {event.sender_id}")
@@ -890,7 +885,6 @@ def setup_commands(client_instance):
             f"• Active Day: 📅 **{day_cap}** (`{CSV_FILE}`)\n"
             f"• Loaded Messages: {len(conversation_script):,} messages\n"
             f"• Total Messages Sent: {TOTAL_MESSAGES_SENT}\n"
-            f"• Voice Note Engine: 🎙 ONLINE (1 voice note every ~{VOICE_FREQUENCY} msgs)\n"
             f"• Connected Workers: {connected_accs}\n"
             f"• Target Whitelist: `{TARGET_CHAT}`"
         )
@@ -990,34 +984,6 @@ def setup_commands(client_instance):
         CHAT_PAUSED = False
         await reply_safely(event, "🔄 Settings reset to factory defaults (Speed: 10s, Delete: 360s).")
 
-    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicefreq(?:@genzetabot)?(?:\s+(.+))?$'))
-    async def voicefreq_handler(event):
-        if await should_skip(event, "setvoicefreq"):
-            return
-        allowed, reason = await check_command_auth(event, "setvoicefreq")
-        if not allowed:
-            if reason:
-                await reply_safely(event, f"❌ {reason}")
-            return
-        global VOICE_FREQUENCY
-        arg = event.pattern_match.group(1)
-        if arg and arg.strip().isdigit():
-            VOICE_FREQUENCY = max(1, int(arg.strip()))
-            await reply_safely(event, f"🎙 Voice Note Frequency set to every **{VOICE_FREQUENCY}** messages.")
-        else:
-            await reply_safely(event, f"ℹ️ Current Voice Note Frequency: every **{VOICE_FREQUENCY}** messages.")
-
-    @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?setvoicecooldown(?:@genzetabot)?(?:\s+(.+))?$'))
-    async def voicecooldown_handler(event):
-        if await should_skip(event, "setvoicecooldown"):
-            return
-        allowed, reason = await check_command_auth(event, "setvoicecooldown")
-        if not allowed:
-            if reason:
-                await reply_safely(event, f"❌ {reason}")
-            return
-        await reply_safely(event, "🎙 Voice Cooldown updated.")
-
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?topic(?:@genzetabot)?(?:\s+(.+))?$'))
     async def topic_handler(event):
         if await should_skip(event, "topic"):
@@ -1038,7 +1004,15 @@ def setup_commands(client_instance):
 
     @client_instance.on(events.NewMessage())
     async def auto_delete_group_handler(event):
-        if event.raw_text and event.raw_text.lower().startswith(("/lockon", "/lockoff", "lockon", "lockoff", "/setspeed", "setspeed", "speed", "/speed")):
+        raw = (event.raw_text or "").strip().lower()
+        if any(raw.startswith(cmd) for cmd in (
+            "/lockon", "lockon", "!lockon", ".lockon",
+            "/lockoff", "lockoff", "!lockoff", ".lockoff",
+            "/setspeed", "setspeed", "/speed", "speed",
+            "/stats", "stats", "/day", "day", "/setday", "setday",
+            "/setdelete", "setdelete", "/pause", "pause", "/resume", "resume",
+            "/resetgroup", "resetgroup", "/topic", "topic"
+        )):
             return
         if await should_skip(event):
             return
@@ -1202,11 +1176,11 @@ async def main():
                 except Exception as de:
                     logging.debug(f"Dialog pre-fetch warning: {de}")
 
-                # Method B: Check invite hash 'noVnALjR8Uw1OWU1'
+                # Method B: Check invite hash 'Elgeiny2Lk81MzRl'
                 if not target_resolved:
                     try:
                         from telethon.tl.functions.messages import CheckChatInviteRequest
-                        c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("noVnALjR8Uw1OWU1")), timeout=8.0)
+                        c_res = await asyncio.wait_for(acc1_client(CheckChatInviteRequest("Elgeiny2Lk81MzRl")), timeout=8.0)
                         if hasattr(c_res, 'chat'):
                             TARGET_CHAT_ID = utils.get_peer_id(c_res.chat)
                             ALLOWED_GROUP_IDS.add(TARGET_CHAT_ID)
