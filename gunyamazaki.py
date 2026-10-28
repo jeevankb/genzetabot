@@ -228,6 +228,7 @@ conversation_script = []
 conversation_data = []       # alias for compatibility
 active_day_name = "monday"
 CSV_FILE = "conversations_monday.csv"
+manual_day_override = False
 worker_rate_limited_until = {}
 processed_cmd_msg_ids = set()
 processed_human_msg_ids = set()
@@ -501,6 +502,16 @@ async def chat_loop():
             if CHAT_PAUSED:
                 await asyncio.sleep(1)
                 continue
+
+            # Automatic midnight IST rollover to next day's dataset
+            if not manual_day_override:
+                today_ist = get_ist_day_name()
+                if today_ist != active_day_name:
+                    logging.info(f"📅 Midnight IST rollover detected! Switching from {active_day_name} to {today_ist}...")
+                    load_csv(today_ist)
+                    line_index = random.randint(0, max(0, len(conversation_script) - 1)) if conversation_script else 0
+                    message_tracker.clear()
+
             if not conversation_script:
                 logging.error("The conversation script is empty! Stopping.")
                 break
@@ -876,6 +887,11 @@ def setup_commands(client_instance):
         if cmd == "lockon":
             CHAT_PAUSED = False
             bot_active = True
+            # Auto-sync to today's real IST day if not manually overridden
+            if not manual_day_override:
+                today_ist = get_ist_day_name()
+                if today_ist != active_day_name or not conversation_script:
+                    load_csv(today_ist)
             # Cancel any previous tasks immediately
             for t in list(active_chat_tasks):
                 if not t.done():
@@ -1011,13 +1027,21 @@ def setup_commands(client_instance):
                 await reply_safely(event, f"❌ {reason}")
             return
         arg = event.pattern_match.group(1)
-        valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "auto"]
         if not arg or arg.strip().lower() not in valid_days:
-            await reply_safely(event, f"❌ Please specify a valid day: {', '.join(valid_days)}\nExample: `setday friday`")
+            await reply_safely(event, f"❌ Please specify a valid day: {', '.join(valid_days)}\nExample: `setday wednesday` or `setday auto`")
             return
-        target_day = arg.strip().lower()
-        load_csv(target_day)
-        await reply_safely(event, f"📅 **Active Day Switched to {target_day.capitalize()}!**\nLoaded `{CSV_FILE}` with {len(conversation_script)} messages.")
+        target = arg.strip().lower()
+        global manual_day_override
+        if target == "auto":
+            manual_day_override = False
+            today_ist = get_ist_day_name()
+            load_csv(today_ist)
+            await reply_safely(event, f"📅 **Active Day set to AUTO!**\nSynced to real-time day: **{today_ist.capitalize()}** (`{CSV_FILE}`) with {len(conversation_script)} messages.\nM раздела: Automatic midnight IST rollover is ACTIVE.")
+        else:
+            manual_day_override = True
+            load_csv(target)
+            await reply_safely(event, f"📅 **Active Day Switched to {target.capitalize()}!** (Manual Override)\nLoaded `{CSV_FILE}` with {len(conversation_script)} messages.\nTip: Use `/setday auto` to restore automatic IST rollover.")
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?day(?:@genzetabot)?$'))
     async def day_handler(event):
@@ -1026,11 +1050,15 @@ def setup_commands(client_instance):
         allowed, _ = await check_command_auth(event, "day")
         if not allowed:
             return
+        today_ist = get_ist_day_name()
+        mode_str = "MANUAL (Locked)" if manual_day_override else "AUTO (IST Midnight Rollover)"
         await reply_safely(event, 
             f"📅 **Active Daily Dataset Info**\n\n"
-            f"• Current Day: **{active_day_name.capitalize()}**\n"
-            f"• Active CSV: `{CSV_FILE}`\n"
-            f"• Loaded Messages: {len(conversation_script):,} messages"
+            f"• Current Active Dataset: **{active_day_name.capitalize()}** (`{CSV_FILE}`)\n"
+            f"• Real-Time Day (IST): **{today_ist.capitalize()}**\n"
+            f"• Day Mode: **{mode_str}**\n"
+            f"• Loaded Messages: {len(conversation_script):,} messages\n\n"
+            f"Tip: Use `/setday auto` to sync with real-time day or `/setday <day>` to lock a specific day."
         )
 
     @client_instance.on(events.NewMessage(pattern=r'(?i)^[/.!]?(pause|resume)(?:@genzetabot)?$'))
